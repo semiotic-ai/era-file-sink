@@ -3,3 +3,6 @@
 
 /data
 /target
+.idea
+.DS_Store
+output

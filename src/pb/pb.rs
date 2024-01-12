@@ -22,3 +22,12 @@ pub mod sf {
         }
     }
 }
+
+
+pub mod acme {
+    pub mod verifiable_block {
+        pub mod v1 {
+            include!("acme.verifiable_block.v1.rs");
+        }
+    }
+}

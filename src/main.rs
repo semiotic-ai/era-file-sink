@@ -1,4 +1,5 @@
 use anyhow::{format_err, Context, Error};
+use std::io::Write;
 use futures03::StreamExt;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
@@ -7,16 +8,21 @@ use prost::Message;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
+use crate::e2store::{EraBuilder};
+use crate::header_accumulator::{EPOCH_SIZE, get_epoch};
+use crate::pb::acme::verifiable_block::v1::VerifiableBlock;
 
 mod pb;
 mod substreams;
 mod substreams_stream;
+mod header_accumulator;
+mod e2store;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = env::args();
-    if args.len() < 4 || args.len() > 5 {
-        println!("usage: stream <endpoint> <spkg> <module> [<start>:<stop>]");
+    if args.len() < 5 || args.len() > 6 {
+        println!("usage: stream <endpoint> <spkg> <module> <output_dir> [<start>:<stop>]");
         println!();
         println!("The environment variable SUBSTREAMS_API_TOKEN must be set also");
         println!("and should contain a valid Substream API token.");
@@ -26,6 +32,7 @@ async fn main() -> Result<(), Error> {
     let endpoint_url = env::args().nth(1).unwrap();
     let package_file = env::args().nth(2).unwrap();
     let module_name = env::args().nth(3).unwrap();
+    let output_dir = env::args().nth(4).unwrap();
 
     let token_env = env::var("SUBSTREAMS_API_TOKEN").unwrap_or("".to_string());
     let mut token: Option<String> = None;
@@ -48,72 +55,74 @@ async fn main() -> Result<(), Error> {
         block_range.1,
     );
 
+    let header_accumulator_values = header_accumulator::read_values();
+
+    let mut writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(block_range.0 as u64)))?;
+    // let mut buffer = Vec::new();
+    let mut builder = EraBuilder::new(writer.try_clone()?);
     loop {
-        match stream.next().await {
-            None => {
-                println!("Stream consumed");
+        match process_iteration(&mut stream, &mut builder, header_accumulator_values.clone()).await {
+            Ok(finished_era) => {
+                if finished_era {
+                    writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(builder.starting_number as u64 + EPOCH_SIZE)))?;
+                    builder.reset(writer.try_clone()?);
+                }
+            },
+            Err(err) => {
+                println!("Error: {}", err);
                 break;
             }
-            Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data)?;
-                persist_cursor(data.cursor)?;
-            }
-            Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                process_block_undo_signal(&undo_signal)?;
-                persist_cursor(undo_signal.last_valid_cursor)?;
-            }
-            Some(Err(err)) => {
-                println!();
-                println!("Stream terminated with error");
-                println!("{:?}", err);
-                exit(1);
+        }
+    };
+
+    Ok(())
+}
+
+
+async fn process_iteration<W: Write>(mut stream: &mut SubstreamsStream, mut builder: &mut EraBuilder<W>, header_accumulator_values: Vec<String>) -> Result<bool, anyhow::Error> {
+    match stream.next().await {
+        None => {
+            println!("Stream consumed");
+            Err(anyhow::anyhow!("Stream consumed"))
+        }
+        Some(Ok(BlockResponse::New(data))) => {
+            process_block_scoped_data(&data, &mut builder)?;
+            persist_cursor(data.cursor)?;
+
+            if builder.len() == EPOCH_SIZE as usize {
+                match header_accumulator::get_value_for_block(&header_accumulator_values, builder.starting_number as u64) {
+                    Some(value) => {
+                        let header_accumulator_value = hex::decode(value)?;
+                        println!("Finalizing era with header accumulator value: {:x?}", header_accumulator_value);
+                        builder.finalize(header_accumulator_value)?;
+                        println!("Finalized era");
+
+                        // let writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(builder.starting_number as u64 + EPOCH_SIZE))).unwrap();
+                        Ok(true)
+                    }
+                    None => {
+                        Err(anyhow::anyhow!("Error, no header acc value fond for block: {}", builder.starting_number))
+                    }
+                }
+            } else {
+                Ok(false)
             }
         }
+        Some(Ok(BlockResponse::Undo(_))) => {
+            Err(anyhow::anyhow!("Error, undo signal not supported"))
+        }
+        Some(Err(err)) => {
+            Err(anyhow::anyhow!("Error, stream terminated with error, {}", err))
+        }
     }
-
-    Ok(())
 }
 
-fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
+fn process_block_scoped_data<W: Write>(data: &BlockScopedData, builder: &mut EraBuilder<W>) -> Result<(), Error> {
     let output = data.output.as_ref().unwrap().map_output.as_ref().unwrap();
 
-    // You can decode the actual Any type received using this code:
-    //
-    //     let value = GeneratedStructName::decode(output.value.as_slice())?;
-    //
-    // Where GeneratedStructName is the Rust code generated for the Protobuf representing
-    // your type, so you will need generate it using `substreams protogen` and import it from the
-    // `src/pb` folder.
+    let block = VerifiableBlock::decode(output.value.as_slice())?;
+    builder.add(block)?;
 
-    println!(
-        "Block #{} - Payload {} ({} bytes)",
-        data.clock.as_ref().unwrap().number,
-        output.type_url.replace("type.googleapis.com/", ""),
-        output.value.len()
-    );
-
-    Ok(())
-}
-
-fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {
-    // `BlockUndoSignal` must be treated as "delete every data that has been recorded after
-    // block height specified by block in BlockUndoSignal". In the example above, this means
-    // you must delete changes done by `Block #7b` and `Block #6b`. The exact details depends
-    // on your own logic. If for example all your added record contain a block number, a
-    // simple way is to do `delete all records where block_num > 5` which is the block num
-    // received in the `BlockUndoSignal` (this is true for append only records, so when only `INSERT` are allowed).
-    unimplemented!("you must implement some kind of block undo handling, or request only final blocks (tweak substreams_stream.rs)")
-}
-
-fn persist_cursor(_cursor: String) -> Result<(), anyhow::Error> {
-    // FIXME: Handling of the cursor is missing here. It should be saved each time
-    // a full block has been correctly processed/persisted. The saving location
-    // is your responsibility.
-    //
-    // By making it persistent, we ensure that if we crash, on startup we are
-    // going to read it back from database and start back our SubstreamsStream
-    // with it ensuring we are continuously streaming without ever losing a single
-    // element.
     Ok(())
 }
 
@@ -135,7 +144,7 @@ fn read_block_range(pkg: &Package, module_name: &str) -> Result<(i64, u64), anyh
         .ok_or_else(|| format_err!("module '{}' not found in package", module_name))?;
 
     let mut input: String = "".to_string();
-    if let Some(range) = env::args().nth(4) {
+    if let Some(range) = env::args().nth(5) {
         input = range;
     };
 
