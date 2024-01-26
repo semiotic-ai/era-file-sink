@@ -1,22 +1,22 @@
 use anyhow::{format_err, Context, Error};
-use std::io::Write;
 use futures03::StreamExt;
-use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
+use pb::sf::substreams::rpc::v2::BlockScopedData;
 use pb::sf::substreams::v1::Package;
+use std::io::Write;
 
+use crate::e2store::EraBuilder;
+use crate::header_accumulator::{get_epoch, EPOCH_SIZE};
+use crate::pb::acme::verifiable_block::v1::VerifiableBlock;
 use prost::Message;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
-use crate::e2store::{EraBuilder};
-use crate::header_accumulator::{EPOCH_SIZE, get_epoch};
-use crate::pb::acme::verifiable_block::v1::VerifiableBlock;
 
+mod e2store;
+mod header_accumulator;
 mod pb;
 mod substreams;
 mod substreams_stream;
-mod header_accumulator;
-mod e2store;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -57,29 +57,40 @@ async fn main() -> Result<(), Error> {
 
     let header_accumulator_values = header_accumulator::read_values();
 
-    let mut writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(block_range.0 as u64)))?;
-    // let mut buffer = Vec::new();
+    let mut writer = std::fs::File::create(format!(
+        "{}/era-{}.era1",
+        output_dir,
+        get_epoch(block_range.0 as u64)
+    ))?;
     let mut builder = EraBuilder::new(writer.try_clone()?);
     loop {
-        match process_iteration(&mut stream, &mut builder, header_accumulator_values.clone()).await {
+        match process_iteration(&mut stream, &mut builder, header_accumulator_values.clone()).await
+        {
             Ok(finished_era) => {
                 if finished_era {
-                    writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(builder.starting_number as u64 + EPOCH_SIZE)))?;
+                    writer = std::fs::File::create(format!(
+                        "{}/era-{}.era1",
+                        output_dir,
+                        get_epoch(builder.starting_number as u64 + EPOCH_SIZE)
+                    ))?;
                     builder.reset(writer.try_clone()?);
                 }
-            },
+            }
             Err(err) => {
                 println!("Error: {}", err);
                 break;
             }
         }
-    };
+    }
 
     Ok(())
 }
 
-
-async fn process_iteration<W: Write>(mut stream: &mut SubstreamsStream, mut builder: &mut EraBuilder<W>, header_accumulator_values: Vec<String>) -> Result<bool, anyhow::Error> {
+async fn process_iteration<W: Write>(
+    stream: &mut SubstreamsStream,
+    mut builder: &mut EraBuilder<W>,
+    header_accumulator_values: Vec<String>,
+) -> Result<bool, anyhow::Error> {
     match stream.next().await {
         None => {
             println!("Stream consumed");
@@ -87,22 +98,28 @@ async fn process_iteration<W: Write>(mut stream: &mut SubstreamsStream, mut buil
         }
         Some(Ok(BlockResponse::New(data))) => {
             process_block_scoped_data(&data, &mut builder)?;
-            persist_cursor(data.cursor)?;
 
             if builder.len() == EPOCH_SIZE as usize {
-                match header_accumulator::get_value_for_block(&header_accumulator_values, builder.starting_number as u64) {
+                match header_accumulator::get_value_for_block(
+                    &header_accumulator_values,
+                    builder.starting_number as u64,
+                ) {
                     Some(value) => {
                         let header_accumulator_value = hex::decode(value)?;
-                        println!("Finalizing era with header accumulator value: {:x?}", header_accumulator_value);
+                        println!(
+                            "Finalizing era with header accumulator value: {:x?}",
+                            header_accumulator_value
+                        );
                         builder.finalize(header_accumulator_value)?;
                         println!("Finalized era");
 
                         // let writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(builder.starting_number as u64 + EPOCH_SIZE))).unwrap();
                         Ok(true)
                     }
-                    None => {
-                        Err(anyhow::anyhow!("Error, no header acc value fond for block: {}", builder.starting_number))
-                    }
+                    None => Err(anyhow::anyhow!(
+                        "Error, no header acc value fond for block: {}",
+                        builder.starting_number
+                    )),
                 }
             } else {
                 Ok(false)
@@ -111,13 +128,17 @@ async fn process_iteration<W: Write>(mut stream: &mut SubstreamsStream, mut buil
         Some(Ok(BlockResponse::Undo(_))) => {
             Err(anyhow::anyhow!("Error, undo signal not supported"))
         }
-        Some(Err(err)) => {
-            Err(anyhow::anyhow!("Error, stream terminated with error, {}", err))
-        }
+        Some(Err(err)) => Err(anyhow::anyhow!(
+            "Error, stream terminated with error, {}",
+            err
+        )),
     }
 }
 
-fn process_block_scoped_data<W: Write>(data: &BlockScopedData, builder: &mut EraBuilder<W>) -> Result<(), Error> {
+fn process_block_scoped_data<W: Write>(
+    data: &BlockScopedData,
+    builder: &mut EraBuilder<W>,
+) -> Result<(), Error> {
     let output = data.output.as_ref().unwrap().map_output.as_ref().unwrap();
 
     let block = VerifiableBlock::decode(output.value.as_slice())?;

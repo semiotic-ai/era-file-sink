@@ -1,7 +1,39 @@
+pub mod rlp_impl;
+pub mod snap_utils;
+
+use crate::pb::acme::verifiable_block::v1::{BigInt, BlockHeader, Transaction, TransactionReceipt, VerifiableBlock};
+use prost::Message;
+use rlp::{Encodable, RlpStream};
 use std::io::Write;
-use rlp::RlpStream;
-use snap::raw::max_compress_len;
-use crate::pb::acme::verifiable_block::v1::{BlockHeader, Transaction, TransactionReceipt, VerifiableBlock};
+use crate::e2store::snap_utils::snap_encode;
+
+#[derive(Debug)]
+pub enum E2StoreType {
+    CompressedHeader = 0x03,
+    CompressedBody = 0x04,
+    CompressedReceipts = 0x05,
+    TotalDifficulty = 0x06,
+    Accumulator = 0x07,
+    Version = 0x3265,
+    BlockIndex = 0x3266
+}
+
+impl TryInto<E2StoreType> for u16 {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> Result<E2StoreType, Self::Error> {
+        match self {
+            0x03 => Ok(E2StoreType::CompressedHeader),
+            0x04 => Ok(E2StoreType::CompressedBody),
+            0x05 => Ok(E2StoreType::CompressedReceipts),
+            0x06 => Ok(E2StoreType::TotalDifficulty),
+            0x07 => Ok(E2StoreType::Accumulator),
+            0x3265 => Ok(E2StoreType::Version),
+            0x3266 => Ok(E2StoreType::BlockIndex),
+            _ => Err(anyhow::anyhow!("Wrong Type"))
+        }
+    }
+}
 
 pub struct EraBuilder<W: Write> {
     writer: W,
@@ -23,7 +55,7 @@ impl<W: Write> EraBuilder<W> {
     pub fn add(self: &mut Self, block: VerifiableBlock) -> Result<(), anyhow::Error> {
         if self.starting_number == -1 {
             let version = E2Store {
-                type_: 0x3265,
+                type_: E2StoreType::Version,
                 length: 0,
                 reserved: 0,
                 data: Vec::new(),
@@ -35,35 +67,52 @@ impl<W: Write> EraBuilder<W> {
             self.starting_number = block.number as i64;
         }
 
+        self.indexes.push(self.bytes_written);
+
         let block_header = block.header.clone().ok_or(anyhow::anyhow!("No header"))?;
-        let total_difficulty = block_header.total_difficulty.clone()
+        let total_difficulty = block_header
+            .total_difficulty
+            .clone()
             .ok_or(anyhow::anyhow!("No total difficulty"))?;
         let header = E2Store::try_from(block_header)?;
         let header = header.into_bytes();
         self.writer.write_all(&header)?;
         self.bytes_written += header.len() as u64;
 
+        let transactions = if block.number == 0 {
+            Vec::new()
+        } else {
+            block.transactions
+        };
+
         let body = BlockBody {
-            transactions: block.transactions.clone(),
+            transactions: transactions.clone(),
             uncles: block.uncles.clone(),
         };
+
         let body = E2Store::try_from(body)?.into_bytes();
+
         self.writer.write_all(&body)?;
         self.bytes_written += body.len() as u64;
 
-        let receipts = block.transactions.iter().map(|transaction| {
-            transaction.receipt.clone().ok_or(anyhow::anyhow!("No receipt"))
-        }).collect::<Result<Vec<TransactionReceipt>, anyhow::Error>>()?;
+        let receipts = transactions
+            .iter()
+            .map(|transaction| {
+                transaction
+                    .receipt
+                    .clone()
+                    .ok_or(anyhow::anyhow!("No receipt"))
+            })
+            .collect::<Result<Vec<TransactionReceipt>, anyhow::Error>>()?;
         let receipts = E2Store::try_from(receipts)?;
         let receipts = receipts.into_bytes();
 
         self.writer.write_all(&receipts)?;
         self.bytes_written += receipts.len() as u64;
 
-        // let total_difficulty = block_header.total_difficulty.ok_or(anyhow::anyhow!("No total difficulty"))?;
-        let total_difficulty = total_difficulty.bytes;
+        let mut total_difficulty = encode_bigint(total_difficulty);
         let total_difficulty = E2Store {
-            type_: 0x06,
+            type_: E2StoreType::TotalDifficulty,
             length: total_difficulty.len() as u32,
             reserved: 0,
             data: total_difficulty,
@@ -72,13 +121,12 @@ impl<W: Write> EraBuilder<W> {
         self.writer.write_all(&total_difficulty)?;
         self.bytes_written += total_difficulty.len() as u64;
 
-        self.indexes.push(self.bytes_written);
         Ok(())
     }
 
     pub fn finalize(self: &mut Self, header_accumulator: Vec<u8>) -> Result<(), anyhow::Error> {
         let header_accumulator = E2Store {
-            type_: 0x07,
+            type_: E2StoreType::Accumulator,
             length: header_accumulator.len() as u32,
             reserved: 0,
             data: header_accumulator,
@@ -88,24 +136,27 @@ impl<W: Write> EraBuilder<W> {
         self.writer.write(&header_accumulator)?;
         self.bytes_written += header_accumulator.len() as u64;
 
-        let mut indexes_out = Vec::new();
+        // let mut indexes_out = Vec::new();
+        let count = self.indexes.len();
+        let length = 16 + 8 * count;
+        let mut buf = vec![0; length];
+        let indexes_out = buf.as_mut_slice();
+        indexes_out[0..8].copy_from_slice(&(self.starting_number as u64).to_le_bytes());
 
-        let starting_number = self.starting_number.to_le_bytes();
-        indexes_out.push(starting_number);
-
-        let base: i64 = self.bytes_written as i64 + 3*8; // skip e2store header (type, length) and start block
+        let base: i64 = self.bytes_written as i64 + 3 * 8; // skip e2store header (type, length) and start block
         for (idx, offset) in self.indexes.iter().enumerate() {
-            let relative: i64 = *offset as i64 - base - idx as i64 * 8;
-            indexes_out.push(relative.to_le_bytes());
+            let relative: u64 = (*offset as i64 - base - idx as i64 * 8) as u64;
+            let start_idx = 8 + idx * 8;
+            indexes_out[start_idx..start_idx + 8].copy_from_slice(&relative.to_le_bytes());
         }
 
-        indexes_out.push(self.indexes.len().to_le_bytes());
+        indexes_out[length - 8..].copy_from_slice(&(count as u64).to_le_bytes());
 
         let indexes_out = E2Store {
-            type_: 0x3266,
-            length: indexes_out.len() as u32,
+            type_: E2StoreType::BlockIndex,
+            length: length as u32,
             reserved: 0,
-            data: indexes_out.into_iter().flatten().collect(),
+            data: indexes_out.to_vec(),
         };
 
         let indexes_out = indexes_out.into_bytes();
@@ -126,22 +177,23 @@ impl<W: Write> EraBuilder<W> {
     }
 }
 
+#[derive(Debug)]
 pub struct E2Store {
-    type_: u16,
-    length: u32,
-    reserved: u16,
-    data: Vec<u8>,
+    pub(crate) type_: E2StoreType,
+    pub(crate) length: u32,
+    pub(crate) reserved: u16,
+    pub(crate) data: Vec<u8>,
 }
 
 pub struct BlockBody {
     transactions: Vec<Transaction>,
-    uncles: Vec<BlockHeader>
+    uncles: Vec<BlockHeader>,
 }
 
 impl E2Store {
     pub fn into_bytes(self) -> Vec<u8> {
         let mut vec = Vec::new();
-        vec.extend_from_slice(&self.type_.to_le_bytes());
+        vec.extend_from_slice(&(self.type_ as u16).to_le_bytes());
         vec.extend_from_slice(&self.length.to_le_bytes());
         vec.extend_from_slice(&self.reserved.to_le_bytes());
         vec.extend_from_slice(&self.data);
@@ -153,35 +205,14 @@ impl TryFrom<BlockHeader> for E2Store {
     type Error = anyhow::Error;
 
     fn try_from(block_header: BlockHeader) -> Result<Self, Self::Error> {
-
         // block_header.
-        let mut rlp_encoded = RlpStream::new();
-        rlp_encoded.append(&block_header.parent_hash);
-        rlp_encoded.append(&block_header.uncle_hash);
-        rlp_encoded.append(&block_header.coinbase);
-        rlp_encoded.append(&block_header.state_root);
-        rlp_encoded.append(&block_header.transactions_root);
-        rlp_encoded.append(&block_header.receipt_root);
-        rlp_encoded.append(&block_header.logs_bloom);
-        rlp_encoded.append(&block_header.difficulty.unwrap().bytes.as_slice());
-        rlp_encoded.append(&block_header.number.to_le_bytes().as_slice());
-        rlp_encoded.append(&block_header.gas_limit.to_le_bytes().as_slice());
-        rlp_encoded.append(&block_header.gas_used.to_le_bytes().as_slice());
-        rlp_encoded.append(&block_header.timestamp
-            .ok_or(anyhow::anyhow!("Missing timestamp"))?.seconds.to_le_bytes().as_slice());
-        rlp_encoded.append(&block_header.extra_data);
-        rlp_encoded.append(&block_header.mix_hash);
-        rlp_encoded.append(&block_header.nonce);
-
-        let bytes = rlp_encoded.out();
+        let bytes = block_header.rlp_bytes();
 
         // Snappy compression
-        let mut encoder = snap::raw::Encoder::new();
-        let mut data = vec![0; max_compress_len(bytes.len())];
-        encoder.compress(&bytes, &mut data)?;
+        let data = snap_encode(bytes.as_ref())?;
 
         Ok(E2Store {
-            type_: 0x03,
+            type_: E2StoreType::CompressedHeader,
             length: data.len() as u32,
             reserved: 0,
             data,
@@ -192,71 +223,17 @@ impl TryFrom<BlockHeader> for E2Store {
 impl TryFrom<BlockBody> for E2Store {
     type Error = anyhow::Error;
 
-    fn try_from(value: BlockBody) -> Result<Self, Self::Error> {
+    fn try_from(block_body: BlockBody) -> Result<Self, Self::Error> {
+        let bytes = block_body.rlp_bytes();
 
-        let mut rlp_encoded = RlpStream::new();
-
-        for transaction in value.transactions.iter() {
-            // TODO: might need to be a list of txs, each rlp encoded
-            rlp_encoded.append(&transaction.to);
-            rlp_encoded.append(&transaction.nonce.to_le_bytes().as_slice());
-            // rlp_encoded.append(&transaction.gas_price.clone()
-            //     .ok_or(anyhow::anyhow!("Missing gas price"))?.bytes.as_slice());
-
-            match transaction.gas_price.clone() {
-                Some(gas_price) => {
-                    rlp_encoded.append(&gas_price.bytes.as_slice());
-                },
-                None => {
-                    rlp_encoded.append(&[0u8].as_slice());
-                    println!("Missing gas price")
-                }
-            }
-
-            rlp_encoded.append(&transaction.gas_limit.to_le_bytes().as_slice());
-            // rlp_encoded.append(&transaction.value.clone()
-            //     .ok_or(anyhow::anyhow!("Missing tx value"))?.bytes.as_slice());
-
-            match transaction.value.clone() {
-                Some(value) => {
-                    rlp_encoded.append(&value.bytes.as_slice());
-                },
-                None => {
-                    rlp_encoded.append(&[0u8].as_slice());
-                    println!("Missing tx value")
-                }
-            }
-
-            rlp_encoded.append(&transaction.input);
-            rlp_encoded.append(&transaction.v.as_slice());
-            rlp_encoded.append(&transaction.r.as_slice());
-            rlp_encoded.append(&transaction.s.as_slice());
-            rlp_encoded.append(&transaction.r#type.to_le_bytes().as_slice());
-
-            transaction.access_list.iter().for_each(|access| {
-                rlp_encoded.append(&access.address);
-                rlp_encoded.append(&access.storage_keys.iter().flatten().map(|ptr| ptr.clone()).collect::<Vec<u8>>());
-            });
-        };
-
-        for uncle in value.uncles.iter() {
-            let uncle = E2Store::try_from(uncle.clone())?;
-            rlp_encoded.append(&uncle.into_bytes());
-        }
-
-        let bytes = rlp_encoded.out();
-        let mut encoder = snap::raw::Encoder::new();
-
-        let mut data = vec![0; max_compress_len(bytes.len())];
-        encoder.compress(&bytes, &mut data)?;
+        let data = snap_encode(bytes.as_ref())?;
 
         Ok(E2Store {
-            type_: 0x04,
+            type_: E2StoreType::CompressedBody,
             length: data.len() as u32,
             reserved: 0,
             data,
         })
-
     }
 }
 
@@ -265,34 +242,27 @@ impl TryFrom<Vec<TransactionReceipt>> for E2Store {
 
     fn try_from(receipts: Vec<TransactionReceipt>) -> Result<Self, Self::Error> {
         let mut rlp_encoded = RlpStream::new();
-
-        receipts.iter().for_each(|receipt| {
-            // TODO: Check if this is correct, might need to be a list of receipts
-            rlp_encoded.append(&receipt.state_root);
-            rlp_encoded.append(&receipt.cumulative_gas_used.to_le_bytes().as_slice());
-            rlp_encoded.append(&receipt.logs_bloom);
-
-            receipt.logs.iter().for_each(|log| { // TODO: Check
-                rlp_encoded.append(&log.address);
-                rlp_encoded.append(&log.topics.iter().flatten().map(|ptr| ptr.clone()).collect::<Vec<u8>>());
-                rlp_encoded.append(&log.data);
-            });
-        });
+        rlp_encoded.append_list(receipts.as_slice());
 
         let bytes = rlp_encoded.out();
-        let mut encoder = snap::raw::Encoder::new();
 
-        let mut data = vec![0; max_compress_len(bytes.len())];
-        encoder.compress(&bytes, &mut data)?;
+        let data = snap_encode(bytes.as_ref())?;
 
         Ok(E2Store {
-            type_: 0x05,
+            type_: E2StoreType::CompressedReceipts,
             length: data.len() as u32,
             reserved: 0,
             data,
         })
-
     }
 }
 
+pub fn encode_bigint(big_int: BigInt) -> Vec<u8> {
+    let mut bytes = big_int.bytes;
+    bytes.reverse();
+    if bytes.len() < 32 {
+        bytes.append(&mut vec![0; 32 - bytes.len()]);
+    }
 
+    bytes
+}

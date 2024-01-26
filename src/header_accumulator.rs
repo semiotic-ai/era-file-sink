@@ -3,7 +3,10 @@ use embed_file::embed_string;
 pub const EPOCH_SIZE: u64 = 8192;
 
 pub fn read_values() -> Vec<String> {
-   embed_string!("assets/acc_values.txt").lines().map(|line| line.to_string()).collect()
+    embed_string!("assets/acc_values.txt")
+        .lines()
+        .map(|line| line.to_string())
+        .collect()
 }
 
 pub fn get_epoch(block_number: u64) -> u64 {
