@@ -264,7 +264,9 @@ pub struct Transaction {
     // `REASON_REWARD_TRANSACTION_FEE` and for nonce change, still on the root call, you pick the nonce change which the
     // smallest ordinal (if more than one).
     //   TransactionTraceStatus status = 30;
-
+    #[prost(enumeration = "TransactionTraceStatus", tag = "30")]
+    pub status: i32,
+    
     #[prost(message, optional, tag="31")]
     pub receipt: ::core::option::Option<TransactionReceipt>,
 }

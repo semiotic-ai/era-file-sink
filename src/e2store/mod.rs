@@ -1,11 +1,16 @@
 pub mod rlp_impl;
 pub mod snap_utils;
 
-use crate::pb::acme::verifiable_block::v1::{BigInt, BlockHeader, Transaction, TransactionReceipt, VerifiableBlock};
+use crate::pb::acme::verifiable_block::v1::{BigInt, BlockHeader, Transaction, TransactionReceipt, VerifiableBlock, Log as BlockLog};
+use bytes::BytesMut;
+use decoder::{receipts::{error::ReceiptError, receipt::FullReceipt}, transactions::tx_type::map_tx_type};
 use prost::Message;
+use reth_primitives::{Address, Bloom, Bytes, Log, Receipt, ReceiptWithBloom, H256};
 use rlp::{Encodable, RlpStream};
 use std::io::Write;
 use crate::e2store::snap_utils::snap_encode;
+
+const BYZANTIUM_HARDFORK: u64 = 4_370_000;
 
 #[derive(Debug)]
 pub enum E2StoreType {
@@ -94,17 +99,28 @@ impl<W: Write> EraBuilder<W> {
 
         self.writer.write_all(&body)?;
         self.bytes_written += body.len() as u64;
+        let receipts: E2Store;
+        if block.number < BYZANTIUM_HARDFORK {
+            let receipts_vec = transactions
+                .iter()
+                .map(|transaction| {
+                    transaction
+                        .receipt
+                        .clone()
+                        .ok_or(anyhow::anyhow!("No receipt"))
+                })
+                .collect::<Result<Vec<TransactionReceipt>, anyhow::Error>>()?;
+            receipts = E2Store::try_from(receipts_vec)?;
+        } else {
+            let receipts_vec = transactions
+                .iter()
+                .map(|transaction| {
+                    ReceiptWithBloom::try_from(transaction.clone())
+                })
+                .collect::<Result<Vec<ReceiptWithBloom>, ReceiptError>>()?;
+            receipts = E2Store::try_from(receipts_vec)?;
+        }
 
-        let receipts = transactions
-            .iter()
-            .map(|transaction| {
-                transaction
-                    .receipt
-                    .clone()
-                    .ok_or(anyhow::anyhow!("No receipt"))
-            })
-            .collect::<Result<Vec<TransactionReceipt>, anyhow::Error>>()?;
-        let receipts = E2Store::try_from(receipts)?;
         let receipts = receipts.into_bytes();
 
         self.writer.write_all(&receipts)?;
@@ -257,6 +273,57 @@ impl TryFrom<Vec<TransactionReceipt>> for E2Store {
     }
 }
 
+impl TryFrom<Vec<ReceiptWithBloom>> for E2Store {
+    type Error = anyhow::Error;
+
+    fn try_from(receipts: Vec<ReceiptWithBloom>) -> Result<Self, Self::Error> {
+        let mut bytes = BytesMut::new();
+        reth_rlp::encode_list(receipts.as_slice(), &mut bytes);
+        // let mut rlp_encoded = RlpStream::new();
+        // rlp_encoded.append_list(receipts.as_slice());
+
+        // let bytes = rlp_encoded.out();
+        let data = snap_encode(bytes.as_ref())?;
+
+        Ok(E2Store {
+            type_: E2StoreType::CompressedReceipts,
+            length: data.len() as u32,
+            reserved: 0,
+            data,
+        })
+    }
+}
+
+impl TryFrom<Transaction> for ReceiptWithBloom {
+    type Error = ReceiptError;
+
+    fn try_from(trace: Transaction) -> Result<Self, Self::Error> {
+        let success = map_success(&trace.status)?;
+        let tx_type = map_tx_type(&trace.r#type)?;
+        let trace_receipt = match &trace.receipt {
+            Some(receipt) => receipt,
+            None => return Err(ReceiptError::MissingReceipt),
+        };
+        let logs: Vec<Log> = map_logs(&trace_receipt.logs)?;
+        let cumulative_gas_used = trace_receipt.cumulative_gas_used;
+
+        let receipt = Receipt {
+            success,
+            tx_type,
+            logs,
+            cumulative_gas_used,
+        };
+
+        let bloom = map_bloom(&trace_receipt.logs_bloom)?;
+
+        Ok(Self {
+            receipt,
+            bloom,
+ 
+        })
+    }
+}
+
 pub fn encode_bigint(big_int: BigInt) -> Vec<u8> {
     let mut bytes = big_int.bytes;
     bytes.reverse();
@@ -265,4 +332,57 @@ pub fn encode_bigint(big_int: BigInt) -> Vec<u8> {
     }
 
     bytes
+}
+
+fn map_success(status: &i32) -> Result<bool, ReceiptError> {
+    Ok(*status == 1)
+}
+
+fn map_bloom(slice: &[u8]) -> Result<Bloom, ReceiptError> {
+    if slice.len() == 256 {
+        let array: [u8; 256] = slice
+            .try_into()
+            .expect("Slice length doesn't match array length");
+        Ok(Bloom(array))
+    } else {
+        Err(ReceiptError::InvalidBloom(hex::encode(slice)))
+    }
+}
+
+
+pub(crate) fn map_logs(logs: &[BlockLog]) -> Result<Vec<Log>, ReceiptError> {
+    logs.iter().map(Log::try_from).collect()
+}
+impl TryFrom<&BlockLog> for Log {
+    type Error = ReceiptError;
+
+    fn try_from(log: &BlockLog) -> Result<Self, Self::Error> {
+        let slice: [u8; 20] = log
+            .address
+            .as_slice()
+            .try_into()
+            .map_err(|_| ReceiptError::InvalidAddress(hex::encode(log.address.clone())))?;
+
+        let address = Address::from(slice);
+        let topics = map_topics(&log.topics)?;
+        let data = Bytes::from(log.data.as_slice());
+
+        Ok(Self {
+            address,
+            topics,
+            data,
+        })
+    }
+}
+
+fn map_topics(topics: &[Vec<u8>]) -> Result<Vec<H256>, ReceiptError> {
+    topics.iter().map(map_topic).collect()
+}
+
+fn map_topic(topic: &Vec<u8>) -> Result<H256, ReceiptError> {
+    let slice: [u8; 32] = topic
+        .as_slice()
+        .try_into()
+        .map_err(|_| ReceiptError::InvalidTopic(hex::encode(topic)))?;
+    Ok(H256::from(slice))
 }
