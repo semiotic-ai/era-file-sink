@@ -894,6 +894,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "byteorder",
  "bytes",
  "decoder",
  "embed-file",

@@ -1,6 +1,8 @@
 use crate::pb::acme::verifiable_block::v1::{
-    AccessTuple, BlockHeader, Log, Transaction, TransactionReceipt,
+    AccessTuple, BlockHeader, Log, Transaction, TransactionReceipt, BigInt
 };
+use decoder::{transactions::{error::TransactionError, tx_type::map_tx_type}};
+use reth_primitives::{Bytes, AccessList, AccessListItem, Address, ChainId, Transaction as RethTransaction, TransactionKind, TxEip1559, TxEip2930, TxLegacy, TxType, H256, U128};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use crate::e2store::BlockBody;
 
@@ -54,16 +56,24 @@ impl Encodable for BlockBody {
 
 impl Encodable for Transaction {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_unbounded_list()
-            .append(&encode_number(self.nonce));
+        if self.r#type == 2 {
+            s.append(&encode_number(2u64));
+        } else if self.r#type == 1 {
+            s.append(&encode_number(1u64));
+        }
+        s.begin_unbounded_list();
+        if self.r#type == 1 || self.r#type == 2 {
+            s.append(&encode_number(1u64));
+        }
+        s.append(&encode_number(self.nonce));
 
         match self.gas_price.clone() {
             Some(gas_price) => {
                 s.append(&gas_price.bytes.as_slice()); // TODO: check if this is correct
             }
             None => {
-                s.append_empty_data();
-                println!("Missing gas price")
+                let gas_price = BigInt{bytes: vec![0]};
+                s.append(&gas_price.bytes.as_slice());
             }
         }
 
@@ -72,23 +82,22 @@ impl Encodable for Transaction {
 
         match self.value.clone() {
             Some(value) => {
-                s.append(&value.bytes.as_slice()); // TODO: check if this is correct
+                s.append(&value.bytes.as_slice()); 
             }
             None => {
-                s.append_empty_data();
+                let value = BigInt{bytes: vec![0]};
+                s.append(&value.bytes.as_slice());
             }
         }
 
-        s.append(&self.input)
-            .append(&trim_left(self.v.as_slice()))
+        s.append(&self.input);
+        if self.r#type == 1 || self.r#type == 2 {
+            s.append_list(&self.access_list);
+        }
+        s.append(&trim_left(self.v.as_slice()))
             .append(&trim_left(self.r.as_slice()))
             .append(&trim_left(self.s.as_slice()));
 
-
-        // TODO: handle different transaction types
-
-            // .append(&encode_number(self.r#type as u64))
-            // .append_list(&self.access_list)
         s.finalize_unbounded_list();
     }
 }

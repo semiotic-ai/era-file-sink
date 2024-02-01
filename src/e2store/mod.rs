@@ -1,14 +1,20 @@
 pub mod rlp_impl;
 pub mod snap_utils;
 
-use crate::pb::acme::verifiable_block::v1::{BigInt, BlockHeader, Transaction, TransactionReceipt, VerifiableBlock, Log as BlockLog};
+use crate::pb::acme::verifiable_block::v1::{AccessTuple, BigInt, BlockHeader, Log as BlockLog, Transaction, TransactionReceipt, VerifiableBlock};
 use bytes::BytesMut;
-use decoder::{receipts::{error::ReceiptError, receipt::FullReceipt}, transactions::tx_type::map_tx_type};
+use decoder::{headers::error, receipts::{error::ReceiptError, receipt::FullReceipt}, sf::ethereum::r#type::v2::CallType, transactions::{error::TransactionError, tx_type::map_tx_type}};
 use prost::Message;
-use reth_primitives::{Address, Bloom, Bytes, Log, Receipt, ReceiptWithBloom, H256};
+use reth_primitives::{AccessList, AccessListItem, Address, BlockBody as RethBlockBody, Bloom, Bytes, ChainId, Header, Log, Receipt, ReceiptWithBloom, Signature, Transaction as RethTransaction, TransactionKind, TransactionSigned, TxEip1559, TxEip2930, TxLegacy, TxType, H256, U128};
+use reth_rlp::Encodable as RethEncodable;
+// use reth_rlp::Encodable;
+use revm_primitives::{ruint::aliases::B256, U256};
 use rlp::{Encodable, RlpStream};
-use std::io::Write;
+use thiserror::Error;
+use std::{error::Error, hash::Hash, io::Write, str::FromStr};
 use crate::e2store::snap_utils::snap_encode;
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
+
 
 const BYZANTIUM_HARDFORK: u64 = 4_370_000;
 
@@ -90,12 +96,13 @@ impl<W: Write> EraBuilder<W> {
             block.transactions
         };
 
-        let body = BlockBody {
-            transactions: transactions.clone(),
-            uncles: block.uncles.clone(),
+        let reth_body = RethBlockBody {
+            transactions: transactions.clone().into_iter().map(|tx| TransactionSigned::try_from(&tx.clone()).unwrap()).collect(),
+            ommers: block.uncles.clone().into_iter().map(|header| Header::try_from(&header.clone()).unwrap()).collect(),
+            withdrawals: None
         };
-
-        let body = E2Store::try_from(body)?.into_bytes();
+  
+        let body = E2Store::try_from(reth_body)?.into_bytes();
 
         self.writer.write_all(&body)?;
         self.bytes_written += body.len() as u64;
@@ -253,6 +260,24 @@ impl TryFrom<BlockBody> for E2Store {
     }
 }
 
+impl TryFrom<RethBlockBody> for E2Store {
+    type Error = anyhow::Error;
+
+    fn try_from(block_body: RethBlockBody) -> Result<Self, Self::Error> {
+        let mut bytes = BytesMut::new();
+        block_body.encode(&mut bytes);
+
+        let data = snap_encode(&bytes)?;
+
+        Ok(E2Store {
+            type_: E2StoreType::CompressedBody,
+            length: data.len() as u32,
+            reserved: 0,
+            data,
+        })
+    }
+}
+
 impl TryFrom<Vec<TransactionReceipt>> for E2Store {
     type Error = anyhow::Error;
 
@@ -385,4 +410,276 @@ fn map_topic(topic: &Vec<u8>) -> Result<H256, ReceiptError> {
         .try_into()
         .map_err(|_| ReceiptError::InvalidTopic(hex::encode(topic)))?;
     Ok(H256::from(slice))
+}
+
+
+
+impl TryFrom<&Transaction> for RethTransaction {
+    type Error = TransactionError;
+
+    fn try_from(trace: &Transaction) -> Result<Self, Self::Error> {
+        let tx_type = map_tx_type(&trace.r#type)?;
+
+        let nonce = trace.nonce;
+        let trace_gas_price = match trace.gas_price.clone() {
+            Some(gas_price) => gas_price,
+            None => BigInt { bytes: vec![0] },
+        };
+        let gas_price = trace_gas_price.try_into()?;
+        let gas_limit = trace.gas_limit;
+
+        let to = get_tx_kind(trace)?;
+
+        let chain_id = 1;
+
+        let trace_value = match trace.value.clone() {
+            Some(value) => value,
+            None => BigInt { bytes: vec![0] },
+        };
+        let value = trace_value.try_into()?;
+        let input = Bytes::from(trace.input.as_slice());
+
+        let transaction: RethTransaction = match tx_type {
+            TxType::Legacy => {
+                let v: u8 = if trace.v.is_empty() { 0 } else { trace.v[0] };
+
+                let chain_id: Option<ChainId> = if v == 27 || v == 28 {
+                    None
+                } else {
+                    Some(1)
+                };
+
+                RethTransaction::Legacy(TxLegacy {
+                    chain_id,
+                    nonce,
+                    gas_price,
+                    gas_limit,
+                    to,
+                    value,
+                    input,
+                })
+            }
+            TxType::EIP2930 => {
+                let access_list = compute_access_list(&trace.access_list)?;
+
+                RethTransaction::Eip2930(TxEip2930 {
+                    chain_id,
+                    nonce,
+                    gas_price,
+                    gas_limit,
+                    to,
+                    value,
+                    access_list,
+                    input,
+                })
+            }
+            TxType::EIP1559 => {
+                let access_list = compute_access_list(&trace.access_list)?;
+                let trace_max_fee_per_gas = match trace.max_fee_per_gas.clone() {
+                    Some(max_fee_per_gas) => max_fee_per_gas,
+                    None => BigInt { bytes: vec![0] },
+                };
+                let max_fee_per_gas = trace_max_fee_per_gas.try_into()?;
+
+                let trace_max_priority_fee_per_gas = match trace.max_priority_fee_per_gas.clone() {
+                    Some(max_priority_fee_per_gas) => max_priority_fee_per_gas,
+                    None => BigInt { bytes: vec![0] },
+                };
+                let max_priority_fee_per_gas = trace_max_priority_fee_per_gas.try_into()?;
+
+                RethTransaction::Eip1559(TxEip1559 {
+                    chain_id,
+                    nonce,
+                    gas_limit,
+                    max_fee_per_gas,
+                    max_priority_fee_per_gas,
+                    to,
+                    value,
+                    access_list,
+                    input,
+                })
+            }
+        };
+
+        Ok(transaction)
+    }
+}
+
+pub fn get_tx_kind(trace: &Transaction) -> Result<TransactionKind, TransactionError> {
+    let to = &trace.to;
+    if to.is_empty() {
+        Ok(TransactionKind::Create)
+    } else {
+        let address = Address::from_slice(trace.to.as_slice());
+        Ok(TransactionKind::Call(address))
+    }
+}
+
+
+pub(crate) fn compute_access_list(
+    access_list: &[AccessTuple],
+) -> Result<AccessList, TransactionError> {
+    let access_list_items: Vec<AccessListItem> = access_list
+        .iter()
+        .map(AccessListItem::try_from)
+        .collect::<Result<Vec<AccessListItem>, TransactionError>>(
+    )?;
+
+    Ok(AccessList(access_list_items))
+}
+
+impl TryFrom<&AccessTuple> for AccessListItem {
+    type Error = TransactionError;
+
+    fn try_from(tuple: &AccessTuple) -> Result<Self, Self::Error> {
+        let address: Address = Address::from_slice(tuple.address.as_slice());
+        let storage_keys = tuple
+            .storage_keys
+            .iter()
+            .map(|key| {
+                let key_bytes: [u8; 32] = key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| TransactionError::InvalidStorageKey(hex::encode(key.clone())))?;
+                Ok(H256::from(key_bytes))
+            })
+            .collect::<Result<Vec<H256>, TransactionError>>()?;
+
+        Ok(AccessListItem {
+            address,
+            storage_keys,
+        })
+    }
+}
+
+impl TryFrom<BigInt> for u128 {
+    type Error = TransactionError;
+
+    fn try_from(value: BigInt) -> Result<Self, Self::Error> {
+        let slice = value.bytes.as_slice();
+        let n = U128::try_from_be_slice(slice)
+            .ok_or(TransactionError::InvalidBigInt(hex::encode(slice)))?;
+        Ok(u128::from_le_bytes(n.to_le_bytes()))
+    }
+}
+
+
+impl TryFrom<&Transaction> for TransactionSigned {
+    type Error = TransactionError;
+
+    fn try_from(trace: &Transaction) -> Result<Self, Self::Error> {
+        let transaction = RethTransaction::try_from(trace)?;
+        let signature = Signature::try_from(trace)?;
+        let hash = H256::from_str(&hex::encode(trace.hash.as_slice())).map_err(|_| TransactionError::MissingCall)?;
+        let tx_signed = TransactionSigned {
+            transaction: transaction.clone(),
+            signature: signature.clone(),
+            hash,
+        };
+        Ok(tx_signed)
+    }
+}
+
+
+impl TryFrom<&Transaction> for Signature {
+    type Error = TransactionError;
+
+    fn try_from(trace: &Transaction) -> Result<Self, Self::Error> {
+        let r_bytes: [u8; 32] = trace
+            .r
+            .as_slice()
+            .try_into()
+            .map_err(|_| TransactionError::MissingValue)?;
+        let r = U256::from_be_bytes(r_bytes);
+
+        let s_bytes: [u8; 32] = trace
+            .s
+            .as_slice()
+            .try_into()
+            .map_err(|_| TransactionError::MissingValue)?;
+        let s = U256::from_be_bytes(s_bytes);
+
+        let odd_y_parity = get_y_parity(trace)?;
+
+        Ok(Signature { r, s, odd_y_parity })
+    }
+}
+
+fn get_y_parity(trace: &Transaction) -> Result<bool, TransactionError> {
+    let v: u8 = if trace.v.is_empty() { 0 } else { trace.v[0] };
+
+    if v == 0 || v == 1 {
+        Ok(v == 1)
+    } else if v == 27 || v == 28 {
+        Ok(v - 27 == 1)
+    } else if v == 37 || v == 38 {
+        Ok(v - 37 == 1)
+    } else {
+        Err(TransactionError::MissingValue)
+    }
+}
+
+impl TryFrom<&BlockHeader> for Header {
+    type Error = anyhow::Error;
+
+    fn try_from(block_header: &BlockHeader) -> Result<Self, Self::Error> {
+        let parent_hash = H256::from_slice(block_header.parent_hash.as_slice());
+        let ommers_hash = H256::from_slice(block_header.uncle_hash.as_slice());
+        let beneficiary = Address::from_slice(block_header.coinbase.as_slice());
+        let state_root = H256::from_slice(block_header.state_root.as_slice());
+        let transactions_root = H256::from_slice(block_header.transactions_root.as_slice());
+        let receipts_root = H256::from_slice(block_header.receipt_root.as_slice());
+        let logs_bloom = Bloom::from_slice(block_header.logs_bloom.as_slice());
+        let difficulty = U256::from_be_slice(
+            block_header
+                .difficulty
+                .as_ref()
+                .ok_or(error::BlockHeaderError::InvalidInput)?
+                .bytes
+                .as_slice()).try_into()?;
+        let number = block_header.number;
+        let gas_limit = block_header.gas_limit;
+        let gas_used = block_header.gas_used;
+        let timestamp = block_header.timestamp.clone().ok_or(error::BlockHeaderError::InvalidInput)?.seconds as u64;
+        let extra_data = Bytes::from(block_header.extra_data.as_slice());
+        let mix_hash = H256::from_slice(block_header.mix_hash.as_slice());
+        let nonce = block_header.nonce;
+        let withdrawals_root = match block_header.withdrawals_root.is_empty() {
+            true => None,
+            false => Some(H256::from_slice(
+                block_header.withdrawals_root.as_slice(),
+            )),
+        };
+        let base_fee_per_gas = match block_header.base_fee_per_gas.as_ref() {
+                Some(base_fee_per_gas) => {
+                    let bytes = base_fee_per_gas.bytes.as_slice();
+                    // if bytes is empty return None, else return u64 converted from bytes
+                    match bytes.is_empty() {
+                        true => None,
+                        false => Some(U256::from_be_slice(bytes).try_into()?),
+                    }
+                },
+                    
+                None => None,
+            };
+        Ok(Header {
+            parent_hash,
+            ommers_hash,
+            beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            withdrawals_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            timestamp,
+            extra_data,
+            mix_hash,
+            nonce,
+            base_fee_per_gas
+        })
+    }
 }
