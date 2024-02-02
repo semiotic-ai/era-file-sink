@@ -1,10 +1,8 @@
-use crate::pb::acme::verifiable_block::v1::{
-    AccessTuple, BlockHeader, Log, Transaction, TransactionReceipt, BigInt
-};
-use decoder::{transactions::{error::TransactionError, tx_type::map_tx_type}};
-use reth_primitives::{Bytes, AccessList, AccessListItem, Address, ChainId, Transaction as RethTransaction, TransactionKind, TxEip1559, TxEip2930, TxLegacy, TxType, H256, U128};
-use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use crate::e2store::BlockBody;
+use crate::pb::acme::verifiable_block::v1::{
+    AccessTuple, BigInt, BlockHeader, Log, Transaction, TransactionReceipt,
+};
+use rlp::{Encodable, RlpStream};
 
 impl Encodable for BlockHeader {
     fn rlp_append(&self, s: &mut RlpStream) {
@@ -16,21 +14,13 @@ impl Encodable for BlockHeader {
             .append(&self.transactions_root)
             .append(&self.receipt_root)
             .append(&self.logs_bloom)
-            .append(
-                &self.difficulty.clone().expect("Missing difficulty").bytes
-            )
+            .append(&self.difficulty.clone().expect("Missing difficulty").bytes)
             .append(&encode_number(self.number))
             .append(&encode_number(self.gas_limit))
             .append(&encode_number(self.gas_used))
-            .append(
-                &encode_number(
-                    self
-                        .timestamp
-                        .clone()
-                        .expect("Missing timestamp")
-                        .seconds as u64
-                )
-            )
+            .append(&encode_number(
+                self.timestamp.clone().expect("Missing timestamp").seconds as u64,
+            ))
             .append(&self.extra_data)
             .append(&self.mix_hash)
             .append(&self.nonce.to_be_bytes().as_slice())
@@ -43,7 +33,6 @@ fn encode_number(n: u64) -> Vec<u8> {
     let bytes = n.to_be_bytes();
     bytes[(leading_zeros / 8) as usize..].to_vec()
 }
-
 
 impl Encodable for BlockBody {
     fn rlp_append(&self, s: &mut RlpStream) {
@@ -72,20 +61,19 @@ impl Encodable for Transaction {
                 s.append(&gas_price.bytes.as_slice()); // TODO: check if this is correct
             }
             None => {
-                let gas_price = BigInt{bytes: vec![0]};
+                let gas_price = BigInt { bytes: vec![0] };
                 s.append(&gas_price.bytes.as_slice());
             }
         }
 
-        s.append(&encode_number(self.gas_limit))
-            .append(&self.to);
+        s.append(&encode_number(self.gas_limit)).append(&self.to);
 
         match self.value.clone() {
             Some(value) => {
-                s.append(&value.bytes.as_slice()); 
+                s.append(&value.bytes.as_slice());
             }
             None => {
-                let value = BigInt{bytes: vec![0]};
+                let value = BigInt { bytes: vec![0] };
                 s.append(&value.bytes.as_slice());
             }
         }
@@ -102,11 +90,9 @@ impl Encodable for Transaction {
     }
 }
 
-
 impl Encodable for TransactionReceipt {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s
-            .begin_unbounded_list()
+        s.begin_unbounded_list()
             .append(&self.state_root)
             .append(&encode_number(self.cumulative_gas_used))
             .append(&self.logs_bloom)
@@ -117,7 +103,11 @@ impl Encodable for TransactionReceipt {
 
 impl Encodable for Log {
     fn rlp_append(&self, s: &mut RlpStream) {
-        let topics = self.topics.iter().map(|topic| topic.as_slice()).collect::<Vec<&[u8]>>();
+        let topics = self
+            .topics
+            .iter()
+            .map(|topic| topic.as_slice())
+            .collect::<Vec<&[u8]>>();
         s.begin_unbounded_list()
             .append(&self.address)
             .append_list::<&[u8], &[u8]>(topics.as_slice())
@@ -128,7 +118,11 @@ impl Encodable for Log {
 
 impl Encodable for AccessTuple {
     fn rlp_append(&self, s: &mut RlpStream) {
-        let storage_keys = self.storage_keys.iter().map(|key| key.as_slice()).collect::<Vec<&[u8]>>();
+        let storage_keys = self
+            .storage_keys
+            .iter()
+            .map(|key| key.as_slice())
+            .collect::<Vec<&[u8]>>();
         s.begin_unbounded_list()
             .append(&self.address)
             .append_list::<&[u8], &[u8]>(storage_keys.as_slice())

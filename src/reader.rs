@@ -4,9 +4,8 @@ use std::process::exit;
 mod e2store;
 mod pb;
 
-use e2store::{E2Store, E2StoreType};
 use e2store::snap_utils::snap_decode;
-use crate::pb::acme::verifiable_block::v1::BlockHeader;
+use e2store::{E2Store, E2StoreType};
 
 struct E2StoreReader {
     file: std::fs::File,
@@ -14,9 +13,7 @@ struct E2StoreReader {
 
 impl E2StoreReader {
     pub fn new(file: std::fs::File) -> Self {
-        Self {
-            file,
-        }
+        Self { file }
     }
 
     pub fn read(&mut self) -> Result<E2Store, anyhow::Error> {
@@ -32,19 +29,17 @@ impl E2StoreReader {
             type_,
             length,
             reserved,
-            data
+            data,
         })
     }
 }
 
 pub fn decompress_store(store: &E2Store) -> Result<Vec<u8>, anyhow::Error> {
     match store.type_ {
-        E2StoreType::CompressedHeader | E2StoreType::CompressedBody | E2StoreType::CompressedReceipts => {
-            snap_decode(store.data.as_slice())
-        }
-        _ => {
-            Ok(store.data.clone())
-        }
+        E2StoreType::CompressedHeader
+        | E2StoreType::CompressedBody
+        | E2StoreType::CompressedReceipts => snap_decode(store.data.as_slice()),
+        _ => Ok(store.data.clone()),
     }
 }
 
@@ -119,14 +114,12 @@ pub fn read_files(file1: &str, file2: &str) -> Result<(), anyhow::Error> {
                 }
             }
         }
-
     }
 
     Ok(())
-
 }
 
-fn rlp_decode(data: Vec<u8>) -> Vec<Vec<u8>>{
+fn rlp_decode(data: Vec<u8>) -> Vec<Vec<u8>> {
     // Simple rlp decoder, just return array of elements of list
     rlp::decode_list(data.as_slice())
 }
@@ -140,7 +133,8 @@ fn rlp_decode_body(data: Vec<u8>) -> Vec<Vec<Vec<u8>>> {
     let tx_list_len_len = first_byte - 247;
 
     let mut len_buf = [0; 8];
-    len_buf[..tx_list_len_len as usize].copy_from_slice(&data[start_idx + 1..start_idx + 1 + tx_list_len_len as usize]);
+    len_buf[..tx_list_len_len as usize]
+        .copy_from_slice(&data[start_idx + 1..start_idx + 1 + tx_list_len_len as usize]);
 
     let tx_list_len = u64::from_le_bytes(len_buf);
     let mut res = Vec::new();
@@ -157,7 +151,8 @@ fn rlp_decode_body(data: Vec<u8>) -> Vec<Vec<Vec<u8>>> {
         let tx_len_len = first_byte - 247;
 
         let mut len_buf = [0; 8];
-        len_buf[..tx_len_len as usize].copy_from_slice(&data[idx + 1..idx + 1 + tx_len_len as usize]);
+        len_buf[..tx_len_len as usize]
+            .copy_from_slice(&data[idx + 1..idx + 1 + tx_len_len as usize]);
         let tx_len = u64::from_le_bytes(len_buf);
         println!("tx_len: {}", tx_len);
 
@@ -175,5 +170,4 @@ fn rlp_decode_body(data: Vec<u8>) -> Vec<Vec<Vec<u8>>> {
     }
 
     res
-
 }

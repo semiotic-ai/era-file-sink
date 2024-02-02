@@ -1,5 +1,5 @@
-use std::io::{BufReader, BufWriter, Read, Write};
 use prost::bytes::BufMut;
+use std::io::{BufReader, Read, Write};
 
 pub fn snap_encode(decoded_data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut encoded_data = Vec::new();

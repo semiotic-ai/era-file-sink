@@ -1,19 +1,26 @@
 pub mod rlp_impl;
 pub mod snap_utils;
 
-use crate::pb::acme::verifiable_block::v1::{AccessTuple, BigInt, BlockHeader, Log as BlockLog, Transaction, TransactionReceipt, VerifiableBlock};
-use bytes::BytesMut;
-use decoder::{headers::error, receipts::{error::ReceiptError, receipt::FullReceipt}, sf::ethereum::r#type::v2::CallType, transactions::{error::TransactionError, tx_type::map_tx_type}};
-use prost::Message;
-use reth_primitives::{AccessList, AccessListItem, Address, BlockBody as RethBlockBody, Bloom, Bytes, ChainId, Header, Log, Receipt, ReceiptWithBloom, Signature, Transaction as RethTransaction, TransactionKind, TransactionSigned, TxEip1559, TxEip2930, TxLegacy, TxType, H256, U128};
-use reth_rlp::Encodable as RethEncodable;
-// use reth_rlp::Encodable;
-use revm_primitives::{ruint::aliases::B256, U256};
-use rlp::{Encodable, RlpStream};
-use thiserror::Error;
-use std::{error::Error, hash::Hash, io::Write, str::FromStr};
 use crate::e2store::snap_utils::snap_encode;
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use crate::pb::acme::verifiable_block::v1::{
+    AccessTuple, BigInt, BlockHeader, Log as BlockLog, Transaction, TransactionReceipt,
+    VerifiableBlock,
+};
+use bytes::BytesMut;
+use decoder::{
+    headers::error,
+    receipts::error::ReceiptError,
+    transactions::{error::TransactionError, tx_type::map_tx_type},
+};
+use reth_primitives::{
+    AccessList, AccessListItem, Address, BlockBody as RethBlockBody, Bloom, Bytes, ChainId, Header,
+    Log, Receipt, ReceiptWithBloom, Signature, Transaction as RethTransaction, TransactionKind,
+    TransactionSigned, TxEip1559, TxEip2930, TxLegacy, TxType, H256, U128,
+};
+use reth_rlp::Encodable as RethEncodable;
+use revm_primitives::U256;
+use rlp::{Encodable, RlpStream};
+use std::{io::Write, str::FromStr};
 
 const BYZANTIUM_HARDFORK: u64 = 4_370_000;
 
@@ -25,7 +32,7 @@ pub enum E2StoreType {
     TotalDifficulty = 0x06,
     Accumulator = 0x07,
     Version = 0x3265,
-    BlockIndex = 0x3266
+    BlockIndex = 0x3266,
 }
 
 impl TryInto<E2StoreType> for u16 {
@@ -40,7 +47,7 @@ impl TryInto<E2StoreType> for u16 {
             0x07 => Ok(E2StoreType::Accumulator),
             0x3265 => Ok(E2StoreType::Version),
             0x3266 => Ok(E2StoreType::BlockIndex),
-            _ => Err(anyhow::anyhow!("Wrong Type"))
+            _ => Err(anyhow::anyhow!("Wrong Type")),
         }
     }
 }
@@ -80,7 +87,9 @@ impl<W: Write> EraBuilder<W> {
         self.indexes.push(self.bytes_written);
         let header = block.header.clone().ok_or(anyhow::anyhow!("No header"))?;
         let block_header = Header::try_from(&header)?;
-        let total_difficulty = header.total_difficulty.ok_or(anyhow::anyhow!("No total difficulty"))?;
+        let total_difficulty = header
+            .total_difficulty
+            .ok_or(anyhow::anyhow!("No total difficulty"))?;
         let header = E2Store::try_from(block_header)?;
         let header = header.into_bytes();
         self.writer.write_all(&header)?;
@@ -93,11 +102,20 @@ impl<W: Write> EraBuilder<W> {
         };
 
         let reth_body = RethBlockBody {
-            transactions: transactions.clone().into_iter().map(|tx| TransactionSigned::try_from(&tx.clone()).unwrap()).collect(),
-            ommers: block.uncles.clone().into_iter().map(|uncle| Header::try_from(&uncle.clone()).unwrap()).collect(),
-            withdrawals: None
+            transactions: transactions
+                .clone()
+                .into_iter()
+                .map(|tx| TransactionSigned::try_from(&tx.clone()).unwrap())
+                .collect(),
+            ommers: block
+                .uncles
+                .clone()
+                .into_iter()
+                .map(|uncle| Header::try_from(&uncle.clone()).unwrap())
+                .collect(),
+            withdrawals: None,
         };
-  
+
         let body = E2Store::try_from(reth_body)?.into_bytes();
 
         self.writer.write_all(&body)?;
@@ -117,9 +135,7 @@ impl<W: Write> EraBuilder<W> {
         } else {
             let receipts_vec = transactions
                 .iter()
-                .map(|transaction| {
-                    ReceiptWithBloom::try_from(transaction.clone())
-                })
+                .map(|transaction| ReceiptWithBloom::try_from(transaction.clone()))
                 .collect::<Result<Vec<ReceiptWithBloom>, ReceiptError>>()?;
             receipts = E2Store::try_from(receipts_vec)?;
         }
@@ -351,11 +367,7 @@ impl TryFrom<Transaction> for ReceiptWithBloom {
 
         let bloom = map_bloom(&trace_receipt.logs_bloom)?;
 
-        Ok(Self {
-            receipt,
-            bloom,
- 
-        })
+        Ok(Self { receipt, bloom })
     }
 }
 
@@ -383,7 +395,6 @@ fn map_bloom(slice: &[u8]) -> Result<Bloom, ReceiptError> {
         Err(ReceiptError::InvalidBloom(hex::encode(slice)))
     }
 }
-
 
 pub(crate) fn map_logs(logs: &[BlockLog]) -> Result<Vec<Log>, ReceiptError> {
     logs.iter().map(Log::try_from).collect()
@@ -422,8 +433,6 @@ fn map_topic(topic: &Vec<u8>) -> Result<H256, ReceiptError> {
     Ok(H256::from(slice))
 }
 
-
-
 impl TryFrom<&Transaction> for RethTransaction {
     type Error = TransactionError;
 
@@ -453,11 +462,7 @@ impl TryFrom<&Transaction> for RethTransaction {
             TxType::Legacy => {
                 let v: u8 = if trace.v.is_empty() { 0 } else { trace.v[0] };
 
-                let chain_id: Option<ChainId> = if v == 27 || v == 28 {
-                    None
-                } else {
-                    Some(1)
-                };
+                let chain_id: Option<ChainId> = if v == 27 || v == 28 { None } else { Some(1) };
 
                 RethTransaction::Legacy(TxLegacy {
                     chain_id,
@@ -525,7 +530,6 @@ pub fn get_tx_kind(trace: &Transaction) -> Result<TransactionKind, TransactionEr
     }
 }
 
-
 pub(crate) fn compute_access_list(
     access_list: &[AccessTuple],
 ) -> Result<AccessList, TransactionError> {
@@ -573,14 +577,14 @@ impl TryFrom<BigInt> for u128 {
     }
 }
 
-
 impl TryFrom<&Transaction> for TransactionSigned {
     type Error = TransactionError;
 
     fn try_from(trace: &Transaction) -> Result<Self, Self::Error> {
         let transaction = RethTransaction::try_from(trace)?;
         let signature = Signature::try_from(trace)?;
-        let hash = H256::from_str(&hex::encode(trace.hash.as_slice())).map_err(|_| TransactionError::MissingCall)?;
+        let hash = H256::from_str(&hex::encode(trace.hash.as_slice()))
+            .map_err(|_| TransactionError::MissingCall)?;
         let tx_signed = TransactionSigned {
             transaction: transaction.clone(),
             signature: signature.clone(),
@@ -589,7 +593,6 @@ impl TryFrom<&Transaction> for TransactionSigned {
         Ok(tx_signed)
     }
 }
-
 
 impl TryFrom<&Transaction> for Signature {
     type Error = TransactionError;
@@ -646,32 +649,36 @@ impl TryFrom<&BlockHeader> for Header {
                 .as_ref()
                 .ok_or(error::BlockHeaderError::InvalidInput)?
                 .bytes
-                .as_slice()).try_into()?;
+                .as_slice(),
+        )
+        .try_into()?;
         let number = block_header.number;
         let gas_limit = block_header.gas_limit;
         let gas_used = block_header.gas_used;
-        let timestamp = block_header.timestamp.clone().ok_or(error::BlockHeaderError::InvalidInput)?.seconds as u64;
+        let timestamp = block_header
+            .timestamp
+            .clone()
+            .ok_or(error::BlockHeaderError::InvalidInput)?
+            .seconds as u64;
         let extra_data = Bytes::from(block_header.extra_data.as_slice());
         let mix_hash = H256::from_slice(block_header.mix_hash.as_slice());
         let nonce = block_header.nonce;
         let withdrawals_root = match block_header.withdrawals_root.is_empty() {
             true => None,
-            false => Some(H256::from_slice(
-                block_header.withdrawals_root.as_slice(),
-            )),
+            false => Some(H256::from_slice(block_header.withdrawals_root.as_slice())),
         };
         let base_fee_per_gas = match block_header.base_fee_per_gas.as_ref() {
-                Some(base_fee_per_gas) => {
-                    let bytes = base_fee_per_gas.bytes.as_slice();
-                    // if bytes is empty return None, else return u64 converted from bytes
-                    match bytes.is_empty() {
-                        true => None,
-                        false => Some(U256::from_be_slice(bytes).try_into()?),
-                    }
-                },
-                    
-                None => None,
-            };
+            Some(base_fee_per_gas) => {
+                let bytes = base_fee_per_gas.bytes.as_slice();
+                // if bytes is empty return None, else return u64 converted from bytes
+                match bytes.is_empty() {
+                    true => None,
+                    false => Some(U256::from_be_slice(bytes).try_into()?),
+                }
+            }
+
+            None => None,
+        };
         Ok(Header {
             parent_hash,
             ommers_hash,
@@ -689,7 +696,7 @@ impl TryFrom<&BlockHeader> for Header {
             extra_data,
             mix_hash,
             nonce,
-            base_fee_per_gas
+            base_fee_per_gas,
         })
     }
 }
