@@ -15,7 +15,6 @@ use std::{error::Error, hash::Hash, io::Write, str::FromStr};
 use crate::e2store::snap_utils::snap_encode;
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
-
 const BYZANTIUM_HARDFORK: u64 = 4_370_000;
 
 #[derive(Debug)]
@@ -79,12 +78,9 @@ impl<W: Write> EraBuilder<W> {
         }
 
         self.indexes.push(self.bytes_written);
-
-        let block_header = block.header.clone().ok_or(anyhow::anyhow!("No header"))?;
-        let total_difficulty = block_header
-            .total_difficulty
-            .clone()
-            .ok_or(anyhow::anyhow!("No total difficulty"))?;
+        let header = block.header.clone().ok_or(anyhow::anyhow!("No header"))?;
+        let block_header = Header::try_from(&header)?;
+        let total_difficulty = header.total_difficulty.ok_or(anyhow::anyhow!("No total difficulty"))?;
         let header = E2Store::try_from(block_header)?;
         let header = header.into_bytes();
         self.writer.write_all(&header)?;
@@ -98,7 +94,7 @@ impl<W: Write> EraBuilder<W> {
 
         let reth_body = RethBlockBody {
             transactions: transactions.clone().into_iter().map(|tx| TransactionSigned::try_from(&tx.clone()).unwrap()).collect(),
-            ommers: block.uncles.clone().into_iter().map(|header| Header::try_from(&header.clone()).unwrap()).collect(),
+            ommers: block.uncles.clone().into_iter().map(|uncle| Header::try_from(&uncle.clone()).unwrap()).collect(),
             withdrawals: None
         };
   
@@ -133,7 +129,7 @@ impl<W: Write> EraBuilder<W> {
         self.writer.write_all(&receipts)?;
         self.bytes_written += receipts.len() as u64;
 
-        let mut total_difficulty = encode_bigint(total_difficulty);
+        let total_difficulty = encode_bigint(total_difficulty);
         let total_difficulty = E2Store {
             type_: E2StoreType::TotalDifficulty,
             length: total_difficulty.len() as u32,
@@ -243,6 +239,24 @@ impl TryFrom<BlockHeader> for E2Store {
     }
 }
 
+impl TryFrom<Header> for E2Store {
+    type Error = anyhow::Error;
+
+    fn try_from(header: Header) -> Result<Self, Self::Error> {
+        let mut bytes = BytesMut::new();
+        header.encode(&mut bytes);
+
+        let data = snap_encode(&bytes)?;
+
+        Ok(E2Store {
+            type_: E2StoreType::CompressedHeader,
+            length: data.len() as u32,
+            reserved: 0,
+            data,
+        })
+    }
+}
+
 impl TryFrom<BlockBody> for E2Store {
     type Error = anyhow::Error;
 
@@ -303,11 +317,7 @@ impl TryFrom<Vec<ReceiptWithBloom>> for E2Store {
 
     fn try_from(receipts: Vec<ReceiptWithBloom>) -> Result<Self, Self::Error> {
         let mut bytes = BytesMut::new();
-        reth_rlp::encode_list(receipts.as_slice(), &mut bytes);
-        // let mut rlp_encoded = RlpStream::new();
-        // rlp_encoded.append_list(receipts.as_slice());
-
-        // let bytes = rlp_encoded.out();
+        receipts.encode(&mut bytes);
         let data = snap_encode(bytes.as_ref())?;
 
         Ok(E2Store {

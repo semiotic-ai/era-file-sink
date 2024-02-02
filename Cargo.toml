@@ -36,4 +36,5 @@ reth-rlp = { git = "https://github.com/paradigmxyz/reth", version = "=0.1.0-alph
 bytes = "1.5.0"
 decoder = { git = "https://github.com/semiotic-ai/flat-files-decoder.git"}
 byteorder = "1.5.0"
+serde = "1.0.196"
 

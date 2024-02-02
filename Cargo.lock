@@ -907,6 +907,7 @@ dependencies = [
  "reth-rlp",
  "revm-primitives",
  "rlp",
+ "serde",
  "snap",
  "thiserror",
  "tokio",
