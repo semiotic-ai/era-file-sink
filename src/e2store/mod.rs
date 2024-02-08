@@ -332,7 +332,7 @@ impl TryFrom<Transaction> for ReceiptWithBloom {
     type Error = ReceiptError;
 
     fn try_from(trace: Transaction) -> Result<Self, Self::Error> {
-        let success = map_success(&trace.status)?;
+        let success = map_success(&trace.status);
         let tx_type = map_tx_type(&trace.r#type)?;
         let trace_receipt = match &trace.receipt {
             Some(receipt) => receipt,
@@ -364,8 +364,8 @@ pub fn encode_bigint(big_int: BigInt) -> Vec<u8> {
     bytes
 }
 
-fn map_success(status: &i32) -> Result<bool, ReceiptError> {
-    Ok(*status == 1)
+fn map_success(status: &i32) -> bool {
+    *status == 1
 }
 
 fn map_bloom(slice: &[u8]) -> Result<Bloom, ReceiptError> {
