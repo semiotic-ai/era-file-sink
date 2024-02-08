@@ -1,7 +1,4 @@
-use crate::e2store::BlockBody;
-use crate::pb::acme::verifiable_block::v1::{
-    AccessTuple, BigInt, BlockHeader, Log, Transaction, TransactionReceipt,
-};
+use crate::pb::acme::verifiable_block::v1::{AccessTuple, BlockHeader, Log, TransactionReceipt};
 use rlp::{Encodable, RlpStream};
 
 impl Encodable for BlockHeader {
@@ -32,62 +29,6 @@ fn encode_number(n: u64) -> Vec<u8> {
     let leading_zeros = n.leading_zeros();
     let bytes = n.to_be_bytes();
     bytes[(leading_zeros / 8) as usize..].to_vec()
-}
-
-impl Encodable for BlockBody {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_unbounded_list()
-            .append_list(&self.transactions)
-            .append_list(&self.uncles)
-            .finalize_unbounded_list();
-    }
-}
-
-impl Encodable for Transaction {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        if self.r#type == 2 {
-            s.append(&encode_number(2u64));
-        } else if self.r#type == 1 {
-            s.append(&encode_number(1u64));
-        }
-        s.begin_unbounded_list();
-        if self.r#type == 1 || self.r#type == 2 {
-            s.append(&encode_number(1u64));
-        }
-        s.append(&encode_number(self.nonce));
-
-        match self.gas_price.clone() {
-            Some(gas_price) => {
-                s.append(&gas_price.bytes.as_slice()); // TODO: check if this is correct
-            }
-            None => {
-                let gas_price = BigInt { bytes: vec![0] };
-                s.append(&gas_price.bytes.as_slice());
-            }
-        }
-
-        s.append(&encode_number(self.gas_limit)).append(&self.to);
-
-        match self.value.clone() {
-            Some(value) => {
-                s.append(&value.bytes.as_slice());
-            }
-            None => {
-                let value = BigInt { bytes: vec![0] };
-                s.append(&value.bytes.as_slice());
-            }
-        }
-
-        s.append(&self.input);
-        if self.r#type == 1 || self.r#type == 2 {
-            s.append_list(&self.access_list);
-        }
-        s.append(&trim_left(self.v.as_slice()))
-            .append(&trim_left(self.r.as_slice()))
-            .append(&trim_left(self.s.as_slice()));
-
-        s.finalize_unbounded_list();
-    }
 }
 
 impl Encodable for TransactionReceipt {
@@ -128,16 +69,4 @@ impl Encodable for AccessTuple {
             .append_list::<&[u8], &[u8]>(storage_keys.as_slice())
             .finalize_unbounded_list();
     }
-}
-
-fn trim_left(bytes: &[u8]) -> &[u8] {
-    let mut idx = 0;
-    for byte in bytes {
-        if *byte != 0 {
-            break;
-        }
-        idx += 1;
-    }
-
-    &bytes[idx..]
 }

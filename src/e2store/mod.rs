@@ -273,23 +273,6 @@ impl TryFrom<Header> for E2Store {
     }
 }
 
-impl TryFrom<BlockBody> for E2Store {
-    type Error = anyhow::Error;
-
-    fn try_from(block_body: BlockBody) -> Result<Self, Self::Error> {
-        let bytes = block_body.rlp_bytes();
-
-        let data = snap_encode(bytes.as_ref())?;
-
-        Ok(E2Store {
-            type_: E2StoreType::CompressedBody,
-            length: data.len() as u32,
-            reserved: 0,
-            data,
-        })
-    }
-}
-
 impl TryFrom<RethBlockBody> for E2Store {
     type Error = anyhow::Error;
 
