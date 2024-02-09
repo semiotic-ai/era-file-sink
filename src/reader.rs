@@ -1,10 +1,9 @@
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::process::exit;
 
 mod e2store;
 mod pb;
 
-use e2store::snap_utils::snap_decode;
 use e2store::{E2Store, E2StoreType};
 
 struct E2StoreReader {
@@ -43,6 +42,16 @@ pub fn decompress_store(store: &E2Store) -> Result<Vec<u8>, anyhow::Error> {
     }
 }
 
+pub fn snap_decode(encoded_data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut decoded_data = Vec::new();
+    let reader = BufReader::new(encoded_data);
+    let mut decoder = snap::read::FrameDecoder::new(reader);
+
+    decoder.read_to_end(&mut decoded_data)?;
+
+    Ok(decoded_data)
+}
+
 fn main() {
     let mut args = std::env::args();
     if args.len() < 3 {
@@ -64,7 +73,6 @@ pub fn read_files(file1: &str, file2: &str) -> Result<(), anyhow::Error> {
 
     let mut reader1 = E2StoreReader::new(file1);
     let mut reader2 = E2StoreReader::new(file2);
-    let mut count = 0;
 
     loop {
         let e2store1 = reader1.read()?;

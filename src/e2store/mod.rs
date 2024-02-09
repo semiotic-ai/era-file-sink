@@ -69,7 +69,7 @@ impl<W: Write> EraBuilder<W> {
         }
     }
 
-    pub fn add(self: &mut Self, block: VerifiableBlock) -> Result<(), anyhow::Error> {
+    pub fn add(&mut self, block: VerifiableBlock) -> Result<(), anyhow::Error> {
         if self.starting_number == -1 {
             let version = E2Store {
                 type_: E2StoreType::Version,
@@ -120,8 +120,7 @@ impl<W: Write> EraBuilder<W> {
 
         self.writer.write_all(&body)?;
         self.bytes_written += body.len() as u64;
-        let receipts: E2Store;
-        if block.number < BYZANTIUM_HARDFORK {
+        let receipts = if block.number < BYZANTIUM_HARDFORK {
             let receipts_vec = transactions
                 .iter()
                 .map(|transaction| {
@@ -131,14 +130,14 @@ impl<W: Write> EraBuilder<W> {
                         .ok_or(anyhow::anyhow!("No receipt"))
                 })
                 .collect::<Result<Vec<TransactionReceipt>, anyhow::Error>>()?;
-            receipts = E2Store::try_from(receipts_vec)?;
+            E2Store::try_from(receipts_vec)?
         } else {
             let receipts_vec = transactions
                 .iter()
                 .map(|transaction| ReceiptWithBloom::try_from(transaction.clone()))
                 .collect::<Result<Vec<ReceiptWithBloom>, ReceiptError>>()?;
-            receipts = E2Store::try_from(receipts_vec)?;
-        }
+            E2Store::try_from(receipts_vec)?
+        };
 
         let receipts = receipts.into_bytes();
 
@@ -159,7 +158,7 @@ impl<W: Write> EraBuilder<W> {
         Ok(())
     }
 
-    pub fn finalize(self: &mut Self, header_accumulator: Vec<u8>) -> Result<(), anyhow::Error> {
+    pub fn finalize(&mut self, header_accumulator: Vec<u8>) -> Result<(), anyhow::Error> {
         let header_accumulator = E2Store {
             type_: E2StoreType::Accumulator,
             length: header_accumulator.len() as u32,
@@ -168,7 +167,7 @@ impl<W: Write> EraBuilder<W> {
         };
 
         let header_accumulator = header_accumulator.into_bytes();
-        self.writer.write(&header_accumulator)?;
+        self.writer.write_all(&header_accumulator)?;
         self.bytes_written += header_accumulator.len() as u64;
 
         // let mut indexes_out = Vec::new();
@@ -195,12 +194,12 @@ impl<W: Write> EraBuilder<W> {
         };
 
         let indexes_out = indexes_out.into_bytes();
-        self.writer.write(&indexes_out)?;
+        self.writer.write_all(&indexes_out)?;
         self.bytes_written += indexes_out.len() as u64;
         Ok(())
     }
 
-    pub fn reset(self: &mut Self, writer: W) {
+    pub fn reset(&mut self, writer: W) {
         self.bytes_written = 0;
         self.indexes = Vec::new();
         self.starting_number = -1;
@@ -218,11 +217,6 @@ pub struct E2Store {
     pub(crate) length: u32,
     pub(crate) reserved: u16,
     pub(crate) data: Vec<u8>,
-}
-
-pub struct BlockBody {
-    transactions: Vec<Transaction>,
-    uncles: Vec<BlockHeader>,
 }
 
 impl E2Store {
@@ -570,7 +564,7 @@ impl TryFrom<&Transaction> for TransactionSigned {
             .map_err(|_| TransactionError::MissingCall)?;
         let tx_signed = TransactionSigned {
             transaction: transaction.clone(),
-            signature: signature.clone(),
+            signature,
             hash,
         };
         Ok(tx_signed)
@@ -633,8 +627,7 @@ impl TryFrom<&BlockHeader> for Header {
                 .ok_or(error::BlockHeaderError::InvalidInput)?
                 .bytes
                 .as_slice(),
-        )
-        .try_into()?;
+        );
         let number = block_header.number;
         let gas_limit = block_header.gas_limit;
         let gas_used = block_header.gas_used;

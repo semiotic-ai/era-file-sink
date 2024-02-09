@@ -36,7 +36,7 @@ async fn main() -> Result<(), Error> {
 
     let token_env = env::var("SUBSTREAMS_API_TOKEN").unwrap_or("".to_string());
     let mut token: Option<String> = None;
-    if token_env.len() > 0 {
+    if !token_env.is_empty() {
         token = Some(token_env);
     }
 
@@ -88,7 +88,7 @@ async fn main() -> Result<(), Error> {
 
 async fn process_iteration<W: Write>(
     stream: &mut SubstreamsStream,
-    mut builder: &mut EraBuilder<W>,
+    builder: &mut EraBuilder<W>,
     header_accumulator_values: Vec<String>,
 ) -> Result<bool, anyhow::Error> {
     match stream.next().await {
@@ -97,7 +97,7 @@ async fn process_iteration<W: Write>(
             Err(anyhow::anyhow!("Stream consumed"))
         }
         Some(Ok(BlockResponse::New(data))) => {
-            process_block_scoped_data(&data, &mut builder)?;
+            process_block_scoped_data(&data, builder)?;
 
             if builder.len() == EPOCH_SIZE as usize {
                 match header_accumulator::get_value_for_block(
@@ -169,16 +169,16 @@ fn read_block_range(pkg: &Package, module_name: &str) -> Result<(i64, u64), anyh
         input = range;
     };
 
-    let (prefix, suffix) = match input.split_once(":") {
+    let (prefix, suffix) = match input.split_once(':') {
         Some((prefix, suffix)) => (prefix.to_string(), suffix.to_string()),
         None => ("".to_string(), input),
     };
 
     let start: i64 = match prefix.as_str() {
         "" => module.initial_block as i64,
-        x if x.starts_with("+") => {
+        x if x.starts_with('+') => {
             let block_count = x
-                .trim_start_matches("+")
+                .trim_start_matches('+')
                 .parse::<u64>()
                 .context("argument <stop> is not a valid integer")?;
 
@@ -192,9 +192,9 @@ fn read_block_range(pkg: &Package, module_name: &str) -> Result<(i64, u64), anyh
     let stop: u64 = match suffix.as_str() {
         "" => 0,
         "-" => 0,
-        x if x.starts_with("+") => {
+        x if x.starts_with('+') => {
             let block_count = x
-                .trim_start_matches("+")
+                .trim_start_matches('+')
                 .parse::<u64>()
                 .context("argument <stop> is not a valid integer")?;
 
@@ -205,7 +205,7 @@ fn read_block_range(pkg: &Package, module_name: &str) -> Result<(i64, u64), anyh
             .context("argument <stop> is not a valid integer")?,
     };
 
-    return Ok((start, stop));
+    Ok((start, stop))
 }
 
 async fn read_package(input: &str) -> Result<Package, anyhow::Error> {
