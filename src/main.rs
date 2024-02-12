@@ -15,6 +15,7 @@ use substreams_stream::{BlockResponse, SubstreamsStream};
 mod e2store;
 mod header_accumulator;
 mod pb;
+mod reth_mappings;
 mod substreams;
 mod substreams_stream;
 

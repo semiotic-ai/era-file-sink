@@ -5,11 +5,6 @@ edition = "2021"
 default-run = "sink"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-## Add binary reader.rs depending on era-file-sink
-[[bin]]
-name = "reader"
-path = "src/reader.rs"
-
 [[bin]]
 name = "sink"
 path = "src/main.rs"

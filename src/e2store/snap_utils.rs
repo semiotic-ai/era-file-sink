@@ -10,4 +10,3 @@ pub fn snap_encode(decoded_data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     Ok(encoder.into_inner()?.into_inner())
 }
-
