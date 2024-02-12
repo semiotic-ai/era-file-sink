@@ -4,7 +4,7 @@ use pb::sf::substreams::rpc::v2::BlockScopedData;
 use pb::sf::substreams::v1::Package;
 use std::io::Write;
 
-use crate::e2store::EraBuilder;
+use crate::e2store::builder::EraBuilder;
 use crate::header_accumulator::{get_epoch, EPOCH_SIZE};
 use crate::pb::acme::verifiable_block::v1::VerifiableBlock;
 use prost::Message;
@@ -16,6 +16,8 @@ mod e2store;
 mod header_accumulator;
 mod pb;
 mod reth_mappings;
+mod rlp;
+mod snap;
 mod substreams;
 mod substreams_stream;
 

@@ -1,4 +1,4 @@
-use prost::bytes::BufMut;
+use bytes::BufMut;
 use std::io::Write;
 
 pub fn snap_encode(decoded_data: &[u8]) -> anyhow::Result<Vec<u8>> {
