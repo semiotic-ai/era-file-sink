@@ -1,4 +1,4 @@
-use crate::pb::acme::verifiable_block::v1::{AccessTuple, BlockHeader, Log, TransactionReceipt};
+use crate::pb::acme::verifiable_block::v1::{BlockHeader, Log, TransactionReceipt};
 use rlp::{Encodable, RlpStream};
 
 impl Encodable for BlockHeader {
@@ -53,20 +53,6 @@ impl Encodable for Log {
             .append(&self.address)
             .append_list::<&[u8], &[u8]>(topics.as_slice())
             .append(&self.data)
-            .finalize_unbounded_list();
-    }
-}
-
-impl Encodable for AccessTuple {
-    fn rlp_append(&self, s: &mut RlpStream) {
-        let storage_keys = self
-            .storage_keys
-            .iter()
-            .map(|key| key.as_slice())
-            .collect::<Vec<&[u8]>>();
-        s.begin_unbounded_list()
-            .append(&self.address)
-            .append_list::<&[u8], &[u8]>(storage_keys.as_slice())
             .finalize_unbounded_list();
     }
 }
