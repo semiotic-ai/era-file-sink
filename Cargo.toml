@@ -5,11 +5,6 @@ edition = "2021"
 default-run = "sink"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-## Add binary reader.rs depending on era-file-sink
-[[bin]]
-name = "reader"
-path = "src/reader.rs"
-
 [[bin]]
 name = "sink"
 path = "src/main.rs"
@@ -30,4 +25,11 @@ embed-file = "0.1.0"
 hex = "0.4.3"
 rlp = "0.5.2"
 snap = "1.1.1"
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", version = "=0.1.0-alpha.4", tag = "v0.1.0-alpha.4" }
+revm-primitives = "=1.1.2"
+reth-rlp = { git = "https://github.com/paradigmxyz/reth", version = "=0.1.0-alpha.4", tag = "v0.1.0-alpha.4" }
+bytes = "1.5.0"
+decoder = { git = "https://github.com/semiotic-ai/flat-files-decoder.git"}
+byteorder = "1.5.0"
+serde = "1.0.196"
 

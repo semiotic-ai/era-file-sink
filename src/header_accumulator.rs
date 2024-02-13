@@ -13,6 +13,6 @@ pub fn get_epoch(block_number: u64) -> u64 {
     block_number / EPOCH_SIZE
 }
 
-pub fn get_value_for_block(data: &Vec<String>, block_number: u64) -> Option<&String> {
+pub fn get_value_for_block(data: &[String], block_number: u64) -> Option<&String> {
     data.get(get_epoch(block_number) as usize)
 }
