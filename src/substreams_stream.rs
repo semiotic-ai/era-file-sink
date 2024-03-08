@@ -62,13 +62,6 @@ fn stream_blocks(
 
     try_stream! {
         loop {
-            println!("Blockstreams disconnected, connecting (endpoint {}, start block {}, stop block {}, cursor {})",
-                &endpoint,
-                start_block_num,
-                stop_block_num,
-                &latest_cursor
-            );
-
             let result = endpoint.clone().substreams(Request {
                 start_block_num,
                 start_cursor: latest_cursor.clone(),
@@ -86,8 +79,6 @@ fn stream_blocks(
 
             match result {
                 Ok(stream) => {
-                    println!("Blockstreams connected");
-
                     let mut encountered_error = false;
                     for await response in stream{
                         match process_substreams_response(response).await {

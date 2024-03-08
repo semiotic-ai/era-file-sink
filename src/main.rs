@@ -24,28 +24,31 @@ mod substreams_stream;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args = env::args();
-    if args.len() < 5 || args.len() > 6 {
-        println!("usage: stream <endpoint> <spkg> <module> <output_dir> [<start>:<stop>]");
+    if args.len() < 2 || args.len() > 3 {
+        println!("usage: stream <output_dir> <start_era>:<stop_era>");
         println!();
-        println!("The environment variable SUBSTREAMS_API_TOKEN must be set also");
+        println!("The environment variable SUBSTREAMS_API_TOKEN must also be set");
         println!("and should contain a valid Substream API token.");
         exit(1);
     }
 
-    let endpoint_url = env::args().nth(1).unwrap();
-    let package_file = env::args().nth(2).unwrap();
-    let module_name = env::args().nth(3).unwrap();
-    let output_dir = env::args().nth(4).unwrap();
+    const ENDPOINT_URL: &str = "https://mainnet.eth.streamingfast.io:443";
+    const PACKAGE_FILE: &str = "https://spkg.io/semiotic-ai/era-file-substream-v1.0.1.spkg";
+    const MODULE_NAME: &str = "map_block";
 
-    let token_env = env::var("SUBSTREAMS_API_TOKEN").unwrap_or("".to_string());
-    let mut token: Option<String> = None;
-    if !token_env.is_empty() {
-        token = Some(token_env);
+    let output_dir = env::args().nth(1).expect("output_dir not provided");
+
+    let token_env = env::var("SUBSTREAMS_API_TOKEN").expect("SUBSTREAMS_API_TOKEN not set");
+    if token_env.is_empty() {
+        println!("The environment variable SUBSTREAMS_API_TOKEN must be set and contain a valid Substream API token.");
+        exit(1);
     }
 
-    let package = read_package(&package_file).await?;
-    let block_range = read_block_range(&package, &module_name)?;
-    let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, token).await?);
+    let token: Option<String> = Some(token_env);
+
+    let package = read_package(&PACKAGE_FILE).await?;
+    let block_range = read_block_range()?;
+    let endpoint = Arc::new(SubstreamsEndpoint::new(&ENDPOINT_URL, token).await?);
 
     let cursor: Option<String> = load_persisted_cursor()?;
 
@@ -53,7 +56,7 @@ async fn main() -> Result<(), Error> {
         endpoint.clone(),
         cursor,
         package.modules.clone(),
-        module_name.to_string(),
+        MODULE_NAME.to_string(),
         block_range.0,
         block_range.1,
     );
@@ -80,7 +83,10 @@ async fn main() -> Result<(), Error> {
                 }
             }
             Err(err) => {
-                println!("Error: {}", err);
+                if !err.to_string().is_empty() {
+                    println!("Error: {}", err);
+                }
+
                 break;
             }
         }
@@ -96,8 +102,7 @@ async fn process_iteration<W: Write>(
 ) -> Result<bool, anyhow::Error> {
     match stream.next().await {
         None => {
-            println!("Stream consumed");
-            Err(anyhow::anyhow!("Stream consumed"))
+            Err(anyhow::anyhow!(""))
         }
         Some(Ok(BlockResponse::New(data))) => {
             process_block_scoped_data(&data, builder)?;
@@ -109,18 +114,12 @@ async fn process_iteration<W: Write>(
                 ) {
                     Some(value) => {
                         let header_accumulator_value = hex::decode(value)?;
-                        println!(
-                            "Finalizing era with header accumulator value: {:x?}",
-                            header_accumulator_value
-                        );
                         builder.finalize(header_accumulator_value)?;
-                        println!("Finalized era");
 
-                        // let writer = std::fs::File::create(format!("{}/era-{}.e2s", output_dir, get_epoch(builder.starting_number as u64 + EPOCH_SIZE))).unwrap();
                         Ok(true)
                     }
                     None => Err(anyhow::anyhow!(
-                        "Error, no header acc value fond for block: {}",
+                        "Error, no header acc value found for block: {}",
                         builder.starting_number
                     )),
                 }
@@ -157,56 +156,24 @@ fn load_persisted_cursor() -> Result<Option<String>, anyhow::Error> {
     Ok(None)
 }
 
-fn read_block_range(pkg: &Package, module_name: &str) -> Result<(i64, u64), anyhow::Error> {
-    let module = pkg
-        .modules
-        .as_ref()
-        .unwrap()
-        .modules
-        .iter()
-        .find(|m| m.name == module_name)
-        .ok_or_else(|| format_err!("module '{}' not found in package", module_name))?;
-
-    let mut input: String = "".to_string();
-    if let Some(range) = env::args().nth(5) {
-        input = range;
-    };
-
+fn read_block_range() -> Result<(i64, u64), anyhow::Error> {
+    let input: String = env::args().nth(2).expect("Era range not provided");
     let (prefix, suffix) = match input.split_once(':') {
         Some((prefix, suffix)) => (prefix.to_string(), suffix.to_string()),
         None => ("".to_string(), input),
     };
 
     let start: i64 = match prefix.as_str() {
-        "" => module.initial_block as i64,
-        x if x.starts_with('+') => {
-            let block_count = x
-                .trim_start_matches('+')
-                .parse::<u64>()
-                .context("argument <stop> is not a valid integer")?;
-
-            (module.initial_block + block_count) as i64
-        }
+        "" => 0,
         x => x
             .parse::<i64>()
             .context("argument <start> is not a valid integer")?,
     };
 
-    let stop: u64 = match suffix.as_str() {
-        "" => 0,
-        "-" => 0,
-        x if x.starts_with('+') => {
-            let block_count = x
-                .trim_start_matches('+')
-                .parse::<u64>()
-                .context("argument <stop> is not a valid integer")?;
+    let stop: u64 = suffix.parse::<u64>().context("argument <stop> is not a valid integer")?;
 
-            start as u64 + block_count
-        }
-        x => x
-            .parse::<u64>()
-            .context("argument <stop> is not a valid integer")?,
-    };
+    let start = start * EPOCH_SIZE as i64;
+    let stop = (stop+1) * EPOCH_SIZE;
 
     Ok((start, stop))
 }
