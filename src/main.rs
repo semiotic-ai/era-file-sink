@@ -1,8 +1,11 @@
 use anyhow::{format_err, Context, Error};
+use decoder::sf::bstream::v1::Block;
 use futures03::StreamExt;
 use pb::sf::substreams::rpc::v2::BlockScopedData;
 use pb::sf::substreams::v1::Package;
+use std::fs::File;
 use std::io::Write;
+use tokio::sync::mpsc::{self, Receiver};
 
 use crate::e2store::builder::EraBuilder;
 use crate::header_accumulator::{get_epoch, EPOCH_SIZE};
@@ -49,7 +52,7 @@ async fn main() -> Result<(), Error> {
     let package = read_package(&PACKAGE_FILE).await?;
     let block_range = read_block_range()?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&ENDPOINT_URL, token).await?);
-
+    let (sender, mut receiver) = mpsc::channel(4);
     let cursor: Option<String> = load_persisted_cursor()?;
 
     let mut stream = SubstreamsStream::new(
@@ -59,6 +62,7 @@ async fn main() -> Result<(), Error> {
         MODULE_NAME.to_string(),
         block_range.0,
         block_range.1,
+        sender,
     );
 
     let header_accumulator_values = header_accumulator::read_values();
@@ -69,30 +73,100 @@ async fn main() -> Result<(), Error> {
         get_epoch(block_range.0 as u64)
     ))?;
     let mut builder = EraBuilder::new(writer.try_clone()?);
-    loop {
-        match process_iteration(&mut stream, &mut builder, header_accumulator_values.clone()).await
-        {
-            Ok(finished_era) => {
-                if finished_era {
-                    writer = std::fs::File::create(format!(
-                        "{}/era-{}.era1",
-                        output_dir,
-                        get_epoch(builder.starting_number as u64 + EPOCH_SIZE)
-                    ))?;
-                    builder.reset(writer.try_clone()?);
+
+    let res = create_era1(
+        &mut writer,
+        &mut builder,
+        &mut stream,
+        &mut receiver,
+        header_accumulator_values,
+        output_dir,
+    )
+    .await;
+
+    // loop {
+    //     match process_iteration(&mut stream, &mut builder, header_accumulator_values.clone()).await
+    //     {
+    //         Ok(finished_era) => {
+    //             if finished_era {
+    //                 writer = std::fs::File::create(format!(
+    //                     "{}/era-{}.era1",
+    //                     output_dir,
+    //                     get_epoch(builder.starting_number as u64 + EPOCH_SIZE)
+    //                 ))?;
+    //                 builder.reset(writer.try_clone()?);
+    //             }
+    //         }
+    //         Err(err) => {
+    //             if !err.to_string().is_empty() {
+    //                 println!("Error: {}", err);
+    //             }
+
+    //             break;
+    //         }
+    //     }
+    // }
+
+    Ok(())
+}
+
+async fn create_era1(
+    writer: &mut std::fs::File,
+    builder: &mut EraBuilder<std::fs::File>,
+    stream: &mut SubstreamsStream,
+    receiver: &mut Receiver<BlockResponse>,
+    header_accumulator_values: Vec<String>,
+    output_dir: String,
+) -> Result<bool, anyhow::Error> {
+    while let Some(response) = receiver.recv().await {
+        match response {
+            BlockResponse::New(data) => {
+                if let Err(e) = process_block_scoped_data(&data, builder) {
+                    eprintln!("Error processing block scoped data: {}", e);
+                    continue; // Skip this iteration and continue with the next message
+                }
+                println!("received response");
+
+                if builder.len() == EPOCH_SIZE as usize {
+                    let block_number = builder.starting_number as u64;
+                    match header_accumulator::get_value_for_block(
+                        &header_accumulator_values,
+                        block_number,
+                    ) {
+                        Some(value) => match hex::decode(value) {
+                            Ok(header_accumulator_value) => {
+                                if let Err(e) = builder.finalize(header_accumulator_value) {
+                                    eprintln!("Error finalizing builder: {}", e);
+                                    continue;
+                                }
+                                builder.reset(writer.try_clone()?);
+                            }
+                            Err(e) => {
+                                eprintln!("Error decoding header accumulator value: {}", e);
+                                continue;
+                            }
+                        },
+                        None => {
+                            eprintln!(
+                                "Error, no header accumulator value found for block: {}",
+                                block_number
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    //TODO: Implement logic for cases where builder length is not equal to EPOCH_SIZE
+                    println!("Builder length is not equal to EPOCH_SIZE, handling case...");
                 }
             }
-            Err(err) => {
-                if !err.to_string().is_empty() {
-                    println!("Error: {}", err);
-                }
-
-                break;
+            BlockResponse::Undo(undo) => {
+                // Handle undo operation, log it or implement undo logic
+                println!("Undo signal received: {:?}", undo);
             }
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 async fn process_iteration<W: Write>(
@@ -101,9 +175,7 @@ async fn process_iteration<W: Write>(
     header_accumulator_values: Vec<String>,
 ) -> Result<bool, anyhow::Error> {
     match stream.next().await {
-        None => {
-            Err(anyhow::anyhow!(""))
-        }
+        None => Err(anyhow::anyhow!("")),
         Some(Ok(BlockResponse::New(data))) => {
             process_block_scoped_data(&data, builder)?;
 
@@ -170,10 +242,12 @@ fn read_block_range() -> Result<(i64, u64), anyhow::Error> {
             .context("argument <start> is not a valid integer")?,
     };
 
-    let stop: u64 = suffix.parse::<u64>().context("argument <stop> is not a valid integer")?;
+    let stop: u64 = suffix
+        .parse::<u64>()
+        .context("argument <stop> is not a valid integer")?;
 
     let start = start * EPOCH_SIZE as i64;
-    let stop = (stop+1) * EPOCH_SIZE;
+    let stop = (stop + 1) * EPOCH_SIZE;
 
     Ok((start, stop))
 }

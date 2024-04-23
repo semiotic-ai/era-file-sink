@@ -33,3 +33,5 @@ decoder = { git = "https://github.com/semiotic-ai/flat-files-decoder.git"}
 byteorder = "1.5.0"
 serde = "1.0.196"
 
+[profile.release]
+debug = true

@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::time::sleep;
+use tokio::{sync::mpsc::Sender, time::sleep};
 use tokio_retry::strategy::ExponentialBackoff;
 
 use crate::pb::sf::substreams::rpc::v2::{
@@ -34,6 +34,7 @@ impl SubstreamsStream {
         output_module_name: String,
         start_block: i64,
         end_block: u64,
+        sender: Sender<BlockResponse>,
     ) -> Self {
         SubstreamsStream {
             stream: Box::pin(stream_blocks(
@@ -43,6 +44,7 @@ impl SubstreamsStream {
                 output_module_name,
                 start_block,
                 end_block,
+                sender,
             )),
         }
     }
@@ -56,6 +58,7 @@ fn stream_blocks(
     output_module_name: String,
     start_block_num: i64,
     stop_block_num: u64,
+    sender: Sender<BlockResponse>,
 ) -> impl Stream<Item = Result<BlockResponse, Error>> {
     let mut latest_cursor = cursor.unwrap_or_default();
     let mut backoff = ExponentialBackoff::from_millis(500).max_delay(Duration::from_secs(45));
@@ -87,7 +90,10 @@ fn stream_blocks(
                                 backoff = ExponentialBackoff::from_millis(500).max_delay(Duration::from_secs(45));
 
                                 let cursor = block_scoped_data.cursor.clone();
-                                yield BlockResponse::New(block_scoped_data);
+
+                                if sender.send(BlockResponse::New(block_scoped_data)).await.is_err() {
+                                    println!("Failed to send BlockResponse::New through channel, receiver dropped?");
+                                }
 
                                 latest_cursor = cursor;
                             },
