@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
     if args.len() < 2 || args.len() > 3 {
         println!("usage: stream <output_dir> <start_era>:<stop_era>");
         println!();
-        println!("The environment variable SUBSTREAMS_API_TOKEN must also be set");
+        println!("The environment variable SUBSTREAMS_API_KEY must also be set");
         println!("and should contain a valid Substream API token.");
         exit(1);
     }
@@ -38,17 +38,17 @@ async fn main() -> Result<(), Error> {
 
     let output_dir = env::args().nth(1).expect("output_dir not provided");
 
-    let token_env = env::var("SUBSTREAMS_API_TOKEN").expect("SUBSTREAMS_API_TOKEN not set");
-    if token_env.is_empty() {
-        println!("The environment variable SUBSTREAMS_API_TOKEN must be set and contain a valid Substream API token.");
+    let api_key = env::var("SUBSTREAMS_API_KEY").expect("SUBSTREAMS_API_KEY not set");
+    if api_key.is_empty() {
+        println!("The environment variable SUBSTREAMS_API_KEY must be set and contain a valid Substream API token.");
         exit(1);
     }
 
-    let token: Option<String> = Some(token_env);
+    let api_key: Option<String> = Some(api_key);
 
     let package = read_package(&PACKAGE_FILE).await?;
     let block_range = read_block_range()?;
-    let endpoint = Arc::new(SubstreamsEndpoint::new(&ENDPOINT_URL, token).await?);
+    let endpoint = Arc::new(SubstreamsEndpoint::new(&ENDPOINT_URL, api_key).await?);
 
     let cursor: Option<String> = load_persisted_cursor()?;
 
@@ -101,9 +101,7 @@ async fn process_iteration<W: Write>(
     header_accumulator_values: Vec<String>,
 ) -> Result<bool, anyhow::Error> {
     match stream.next().await {
-        None => {
-            Err(anyhow::anyhow!(""))
-        }
+        None => Err(anyhow::anyhow!("")),
         Some(Ok(BlockResponse::New(data))) => {
             process_block_scoped_data(&data, builder)?;
 
@@ -170,10 +168,12 @@ fn read_block_range() -> Result<(i64, u64), anyhow::Error> {
             .context("argument <start> is not a valid integer")?,
     };
 
-    let stop: u64 = suffix.parse::<u64>().context("argument <stop> is not a valid integer")?;
+    let stop: u64 = suffix
+        .parse::<u64>()
+        .context("argument <stop> is not a valid integer")?;
 
     let start = start * EPOCH_SIZE as i64;
-    let stop = (stop+1) * EPOCH_SIZE;
+    let stop = (stop + 1) * EPOCH_SIZE;
 
     Ok((start, stop))
 }
