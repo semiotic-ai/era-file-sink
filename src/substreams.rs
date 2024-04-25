@@ -1,6 +1,10 @@
 use std::{fmt::Display, sync::Arc, time::Duration};
 
+use anyhow::anyhow;
 use http::{uri::Scheme, Uri};
+use revm_primitives::HashMap;
+use serde::Deserialize;
+
 use tonic::{
     codegen::http,
     metadata::MetadataValue,
@@ -8,6 +12,12 @@ use tonic::{
 };
 
 use crate::pb::sf::substreams::rpc::v2::{stream_client::StreamClient, Request, Response};
+
+#[derive(Deserialize)]
+struct SFRes {
+    token: String,
+    // expires_at: u64, // Using u64 for timestamps is typical in Rust
+}
 
 #[derive(Clone, Debug)]
 pub struct SubstreamsEndpoint {
@@ -23,11 +33,46 @@ impl Display for SubstreamsEndpoint {
 }
 
 impl SubstreamsEndpoint {
-    pub async fn new<S: AsRef<str>>(url: S, token: Option<String>) -> Result<Self, anyhow::Error> {
+    pub async fn new<S: AsRef<str>>(
+        url: S,
+        api_key: Option<String>,
+    ) -> Result<Self, anyhow::Error> {
         let uri = url
             .as_ref()
             .parse::<Uri>()
             .expect("the url should have been validated by now, so it is a valid Uri");
+
+        let client = reqwest::Client::new();
+
+        let mut map = HashMap::new();
+
+        // Insert the api_key as a reference to a string slice (`&str`).
+
+        let data = format!(
+            r#"{{"api_key": "{}", "lifetime": {}}}"#,
+            api_key.unwrap(),
+            "3600"
+        );
+
+        map.insert("lifetime", "3600");
+        let response = client
+            .post("https://auth.streamingfast.io/v1/auth/issue")
+            .header("Content-Type", "application/json") // Explicitly set the content type.
+            .body(data.to_string())
+            .send() // Send the request.
+            .await?; // Wait for the response.
+
+        let token;
+        if response.status().is_success() {
+            let sf_res: SFRes = response.json().await?;
+            token = Some(sf_res.token);
+        } else {
+            eprintln!("Failed to get a successful response: {}", response.status());
+            if let Ok(err_body) = response.text().await {
+                eprintln!("Error details: {}", err_body);
+            }
+            return Err(anyhow!("failed to fetch token"));
+        }
 
         let endpoint = match uri.scheme().unwrap_or(&Scheme::HTTP).as_str() {
             "http" => Channel::builder(uri),

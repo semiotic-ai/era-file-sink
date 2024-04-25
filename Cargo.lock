@@ -908,6 +908,7 @@ dependencies = [
  "revm-primitives",
  "rlp",
  "serde",
+ "serde_json",
  "snap",
  "thiserror",
  "tokio",

@@ -2,6 +2,7 @@
 .envrc*
 
 /data
+/out
 /target
 .idea
 .DS_Store
